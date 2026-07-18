@@ -1,4 +1,4 @@
-"""Read-only runtime status and bounded Milestone 1 host diagnostics."""
+"""Read-only runtime status and bounded host diagnostics."""
 
 from __future__ import annotations
 
@@ -43,7 +43,10 @@ from dploydb.subprocesses import CommandResult, SubprocessRunner
 DOCTOR_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
 _DEFERRED_CHECKS: Final[tuple[tuple[str, str], ...]] = (
     ("remote_storage", "Remote storage checks begin in Milestone 7."),
-    ("migration_execution", "Migration execution begins in Milestone 3."),
+    (
+        "migration_execution",
+        "Doctor never executes migrations; the lock-tracked rehearsal stage owns this check.",
+    ),
     ("application_health", "Application health checks begin in Milestone 4."),
     ("traffic_execution", "Traffic-hook execution begins in Milestone 5."),
 )

@@ -363,6 +363,72 @@ class RestoreResult(DurableModel):
         return serialize_utc_timestamp(value)
 
 
+class CapturedCommandOutput(DurableModel):
+    """One complete bounded and redacted subprocess stream."""
+
+    text: str
+    total_bytes: int = Field(ge=0)
+    retained_bytes: int = Field(ge=0)
+    truncated: bool
+
+    @model_validator(mode="after")
+    def validate_capture(self) -> Self:
+        if self.retained_bytes > self.total_bytes:
+            raise ValueError("retained output bytes must not exceed total bytes")
+        if self.truncated != (self.retained_bytes < self.total_bytes):
+            raise ValueError("output truncation metadata is contradictory")
+        return self
+
+
+class MigrationCommandEvidence(DurableModel):
+    """Redacted durable evidence for the developer-supplied migration command."""
+
+    command: tuple[str, ...]
+    working_directory: str
+    environment_keys: tuple[str, ...]
+    outcome: Literal[
+        "succeeded",
+        "nonzero_exit",
+        "start_failed",
+        "timed_out",
+        "cancelled",
+        "cleanup_failed",
+    ]
+    exit_code: int | None
+    stdout: CapturedCommandOutput
+    stderr: CapturedCommandOutput
+    duration_seconds: float = Field(ge=0)
+    termination_reason: Literal["timeout", "cancellation", "interruption"] | None = None
+    termination_attempted: bool = False
+    forced_kill: bool = False
+    start_error: str | None = None
+    cleanup_error: str | None = None
+
+
+class MigrationRehearsalResult(DurableModel):
+    """Verified evidence produced by a completed migration rehearsal."""
+
+    operation_id: str = Field(pattern=r"^op_[0-9a-f]{32}$")
+    backup_id: str = Field(pattern=r"^backup_[0-9a-f]{32}$")
+    backup_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    database_size_bytes: int = Field(gt=0)
+    database_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    command: MigrationCommandEvidence
+    sqlite: SQLiteVerification
+    completed_at: datetime
+
+    @field_validator("completed_at")
+    @classmethod
+    def normalize_completed_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @field_serializer("completed_at")
+    def serialize_completed_at(self, value: datetime) -> str:
+        return serialize_utc_timestamp(value)
+
+
 class FailureData(TypedDict):
     """Stable JSON-compatible failure shape used by human and CI output."""
 

@@ -4,7 +4,7 @@ DployDB is being built as a deployment-safety tool for applications that use one
 
 ## Current status
 
-Milestones 0 through 2 provide:
+Milestones 0 through 3 provide:
 
 - an installable `dploydb` CLI with help and version commands;
 - strict, duplicate-safe configuration parsing with environment interpolation;
@@ -20,6 +20,10 @@ Milestones 0 through 2 provide:
 - `dploydb backup` and read-only `dploydb verify <backup-id>` with stable JSON output;
 - an internal stopped-application restore engine that creates a verified pre-restore backup and
   restores it automatically if replacement fails;
+- an internal, lock-protected migration rehearsal stage that creates a verified
+  snapshot, migrates only a private disposable copy, captures redacted command
+  evidence, enforces process-tree timeout cleanup, reruns SQLite checks, and
+  records `rehearsal_passed` or a durable failed-safe result;
 - a deterministic Docker Compose demo application;
 - working v1 and v2 release fixtures;
 - a deliberately broken migration fixture;
@@ -27,8 +31,11 @@ Milestones 0 through 2 provide:
 - real SQLite reads, writes, and data-preserving migration behavior.
 
 The demo controller is **not** the DployDB deployment engine. Migration
-rehearsal, candidate isolation, production cutover, application rollback, the
-public manual-restore command, and crash recovery are not implemented yet.
+rehearsal is currently an internal deployment stage; the public
+`deploy --version` flow waits for a trustworthy release resolver and the later
+candidate/cutover milestones. Candidate isolation, production cutover,
+application rollback, the public manual-restore command, and crash recovery are
+not implemented yet.
 
 ## Prerequisites
 
@@ -166,7 +173,7 @@ uv run python demo/controller.py reset
 
 ## Validation
 
-Run the complete Milestone 0 suite:
+Run the complete repository suite:
 
 ```bash
 uv lock --check
@@ -193,8 +200,8 @@ uv run dploydb init
 The generated `dploydb.yaml` is strict: duplicate keys, unknown fields, unsafe
 candidate URLs, relative production paths, shell-style command strings, and
 invalid timeout/retention values are rejected. `${VARIABLE}` interpolation is
-resolved only after structural validation. Host and database checks remain
-assigned to the later `doctor` slice.
+resolved only after structural validation. Host and database checks are kept
+out of parsing and performed by `doctor` or the relevant lock-tracked operation.
 
 `demo/dploydb.yaml` is another valid example for the deterministic fixture. Its
 `/srv/dploydb-demo` paths and placeholder traffic hooks must be adapted before
@@ -214,7 +221,10 @@ operation state, and bounded read-only SQLite `quick_check` and
 `integrity_check`, cleaned-up write probes, disk-space checks, Docker daemon
 inspection, and Compose service validation. Both modes explicitly report
 remote storage, migration execution, application health, and traffic execution
-as skipped; those checks remain assigned to later milestones.
+as skipped. `doctor` never runs a developer migration as a diagnostic; the
+implemented internal rehearsal stage runs it only against a verified disposable
+copy inside a lock-tracked operation. The other skipped integrations remain
+assigned to their later milestones.
 
 Inspect current state without creating, repairing, or deleting state files:
 
@@ -242,3 +252,9 @@ it already exists. Backup database and metadata files are written with mode
 `0600`; metadata is published last and is the success marker. `verify` accepts
 only committed backup IDs in Milestone 2. Public release restore and remote
 upload remain assigned to later milestones.
+
+The Milestone 3 rehearsal API is intentionally internal until candidate
+validation and a trustworthy release resolver are implemented. A configured
+migration command must use `database.path_env` for its database target and must
+not hard-code the production path or perform unrelated production side effects;
+DployDB does not claim to sandbox an arbitrary developer-supplied executable.
