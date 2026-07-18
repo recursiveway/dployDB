@@ -1,7 +1,9 @@
 """CLI contract tests."""
 
 import json
+import stat
 from importlib.metadata import version
+from pathlib import Path
 
 import pytest
 import typer
@@ -19,6 +21,7 @@ def test_help_succeeds() -> None:
     assert result.exit_code == 0
     assert "Deployment safety for SQLite applications" in result.output
     assert "version" in result.output
+    assert "init" in result.output
     assert "Traceback" not in result.output
 
 
@@ -89,3 +92,50 @@ def test_expected_cli_failure_uses_stable_exit_code_without_traceback(json_outpu
     assert "Traceback" not in result.output
     if json_output:
         assert json.loads(result.output) == expected_failure().payload.as_dict()
+
+
+def test_init_creates_a_valid_restrictive_configuration(tmp_path: Path) -> None:
+    config_path = tmp_path / "dploydb.yaml"
+
+    result = runner.invoke(app, ["init", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert f"Created DployDB configuration: {config_path}" in result.output
+    assert "Permissions: 0600" in result.output
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert "Traceback" not in result.output
+
+
+def test_init_json_success_is_machine_readable(tmp_path: Path) -> None:
+    config_path = tmp_path / "dploydb.yaml"
+
+    result = runner.invoke(
+        app,
+        ["init", "--config", str(config_path), "--json"],
+    )
+
+    assert result.exit_code == 0
+    assert json.loads(result.output) == {"ok": True, "config_path": str(config_path)}
+
+
+@pytest.mark.parametrize("json_output", (False, True))
+def test_init_refuses_to_overwrite_existing_file(tmp_path: Path, json_output: bool) -> None:
+    config_path = tmp_path / "dploydb.yaml"
+    original = "existing private contents\n"
+    config_path.write_text(original, encoding="utf-8")
+    arguments = ["init", "--config", str(config_path)]
+    if json_output:
+        arguments.append("--json")
+
+    result = runner.invoke(app, arguments)
+
+    assert result.exit_code == 10
+    assert config_path.read_text(encoding="utf-8") == original
+    assert "already exists and was preserved" in result.output
+    assert "existing private contents" not in result.output
+    assert "Traceback" not in result.output
+    if json_output:
+        payload = json.loads(result.output)
+        assert payload["error_code"] == "configuration_error"
+        assert payload["production_changed"] is False
+        assert payload["recovery_required"] is False

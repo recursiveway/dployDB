@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "Deployment safety for SQLite applications"
 requires-python = ">=3.12"
 dependencies = [
+    "pydantic>=2.11.7",
+    "pyyaml>=6.0.2",
     "rich>=13.9.4",
     "typer>=0.16.0",
 ]
@@ -21,6 +23,7 @@ dev = [
     "pipx>=1.7.1",
     "pytest>=8.4.1",
     "ruff>=0.12.0",
+    "types-pyyaml>=6.0.12.20250516",
 ]
 
 [tool.hatch.build.targets.wheel]

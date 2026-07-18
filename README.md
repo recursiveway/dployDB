@@ -4,16 +4,19 @@ DployDB is being built as a deployment-safety tool for applications that use one
 
 ## Current status
 
-Milestone 0 provides:
+Milestones 0 and 1A–1C provide:
 
 - an installable `dploydb` CLI with help and version commands;
+- strict, duplicate-safe configuration parsing with environment interpolation;
+- in-memory secret registration and output redaction;
+- `dploydb init`, which creates a valid mode-`0600` starter file without overwriting;
 - a deterministic Docker Compose demo application;
 - working v1 and v2 release fixtures;
 - a deliberately broken migration fixture;
 - a deliberately unhealthy application fixture;
 - real SQLite reads, writes, and data-preserving migration behavior.
 
-The demo controller is **not** the DployDB deployment engine. Configuration parsing, verified backups, locking, migration rehearsal, candidate isolation, production cutover, rollback, and recovery are not implemented yet.
+The demo controller is **not** the DployDB deployment engine. Durable state, locking, bounded subprocess orchestration, `doctor`, `status`, verified backups, migration rehearsal, candidate isolation, production cutover, rollback, and recovery are not implemented yet.
 
 ## Prerequisites
 
@@ -169,4 +172,19 @@ The Docker integration tests require a running Docker daemon and perform their o
 
 ## Configuration example
 
-`demo/dploydb.yaml` documents the intended future configuration contract. Milestone 0 does not load or validate it, and its placeholder traffic-hook paths are not implemented. See `IMPLEMENTATION_PLAN.md` for the complete safety requirements and milestone order.
+Create a restrictive starter configuration without overwriting an existing path:
+
+```bash
+uv run dploydb init
+```
+
+The generated `dploydb.yaml` is strict: duplicate keys, unknown fields, unsafe
+candidate URLs, relative production paths, shell-style command strings, and
+invalid timeout/retention values are rejected. `${VARIABLE}` interpolation is
+resolved only after structural validation. Host and database checks remain
+assigned to the later `doctor` slice.
+
+`demo/dploydb.yaml` is another valid example for the deterministic fixture. Its
+`/srv/dploydb-demo` paths and placeholder traffic hooks must be adapted before
+host validation or real use. See `IMPLEMENTATION_PLAN.md` for the complete
+safety requirements and milestone order.

@@ -1,5 +1,5 @@
-# Future-facing DployDB configuration example.
-# Milestone 0 does not load or validate this file.
+# Valid DployDB configuration example for the deterministic fixture.
+# Milestone 1C validates this structure but does not inspect these host paths.
 project: dploydb-demo
 
 state_directory: /srv/dploydb-demo/.dploydb

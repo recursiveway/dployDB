@@ -2,11 +2,13 @@
 
 import json
 from importlib.metadata import version
+from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
 from rich.console import Console
 
+from dploydb.config import DEFAULT_CONFIG_PATH, initialize_configuration
 from dploydb.errors import DployDBError
 from dploydb.models import FailurePayload
 
@@ -79,3 +81,39 @@ def main(
 def version_command() -> None:
     """Show the installed DployDB version."""
     console.print(_version_text())
+
+
+@app.command("init")
+def init_command(
+    config_path: Annotated[
+        Path,
+        typer.Option(
+            "--config",
+            "-c",
+            help="Configuration file to create without overwriting an existing path.",
+        ),
+    ] = DEFAULT_CONFIG_PATH,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit stable machine-readable output."),
+    ] = False,
+) -> None:
+    """Create a restrictive, valid starter configuration."""
+    try:
+        created_path = initialize_configuration(config_path)
+    except DployDBError as error:
+        abort_with_error(error, json_output=json_output)
+
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {"ok": True, "config_path": str(created_path)},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        return
+
+    typer.echo(f"Created DployDB configuration: {created_path}")
+    typer.echo("Permissions: 0600")
+    typer.echo("Next safe action: edit the paths, then run dploydb doctor.")
