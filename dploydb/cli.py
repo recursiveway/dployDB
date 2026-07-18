@@ -8,9 +8,15 @@ from typing import Annotated, NoReturn
 import typer
 from rich.console import Console
 
-from dploydb.config import DEFAULT_CONFIG_PATH, initialize_configuration
-from dploydb.errors import DployDBError
-from dploydb.models import FailurePayload
+from dploydb.config import DEFAULT_CONFIG_PATH, initialize_configuration, load_configuration
+from dploydb.diagnostics import (
+    DoctorReport,
+    StatusReport,
+    inspect_runtime_status,
+    run_doctor,
+)
+from dploydb.errors import DployDBError, InternalError
+from dploydb.models import DiagnosticOutcome, FailurePayload
 
 app = typer.Typer(
     help="Deployment safety for SQLite applications.",
@@ -54,6 +60,64 @@ def abort_with_error(error: DployDBError, *, json_output: bool) -> NoReturn:
     """Emit an expected failure and exit without exposing a traceback."""
     typer.echo(render_failure(error.payload, json_output=json_output), err=not json_output)
     raise typer.Exit(code=int(error.exit_code))
+
+
+def _internal_error() -> InternalError:
+    return InternalError(
+        "An unexpected internal failure prevented the command from completing.",
+        production_changed=False,
+        previous_application_running=None,
+        next_safe_action="Preserve the current evidence and rerun with a corrected installation.",
+    )
+
+
+def _render_doctor(report: DoctorReport, *, json_output: bool) -> str:
+    if json_output:
+        return json.dumps(report.as_dict(), sort_keys=True, separators=(",", ":"))
+    mode = "deep" if report.deep else "standard"
+    lines = [f"DployDB doctor ({mode})", f"Project: {report.project}"]
+    labels = {
+        DiagnosticOutcome.PASSED: "PASS",
+        DiagnosticOutcome.WARNING: "WARN",
+        DiagnosticOutcome.FAILED: "FAIL",
+        DiagnosticOutcome.SKIPPED: "SKIP",
+    }
+    for check in report.checks:
+        lines.append(f"[{labels[check.outcome]}] {check.check_id}: {check.message}")
+    summary = report.as_dict()["summary"]
+    assert isinstance(summary, dict)
+    lines.append("Summary: " + ", ".join(f"{name}={count}" for name, count in summary.items()))
+    if report.failure is not None:
+        lines.extend(("", render_failure(report.failure, json_output=False)))
+    else:
+        lines.append("Next safe action: host diagnostics passed for the implemented checks.")
+    return "\n".join(lines)
+
+
+def _render_status(report: StatusReport, *, json_output: bool) -> str:
+    if json_output:
+        return json.dumps(report.as_dict(), sort_keys=True, separators=(",", ":"))
+    lines = [
+        "DployDB status",
+        f"Project: {report.project}",
+        f"Status: {report.status.value}",
+        f"Lock state: {report.lock['state']}",
+    ]
+    if report.operation is not None:
+        lines.extend(
+            (
+                f"Operation: {report.operation['operation_id']}",
+                f"Operation type: {report.operation['operation_type']}",
+                f"Operation status: {report.operation['status']}",
+                f"Stage: {report.operation['stage']}",
+            )
+        )
+    lines.extend(f"Warning: {warning}" for warning in report.warnings)
+    if report.failure is not None:
+        lines.extend(("", render_failure(report.failure, json_output=False)))
+    else:
+        lines.append(f"Next safe action: {report.next_safe_action}")
+    return "\n".join(lines)
 
 
 def _version_callback(value: bool) -> None:
@@ -117,3 +181,61 @@ def init_command(
     typer.echo(f"Created DployDB configuration: {created_path}")
     typer.echo("Permissions: 0600")
     typer.echo("Next safe action: edit the paths, then run dploydb doctor.")
+
+
+@app.command("doctor")
+def doctor_command(
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", "-c", help="Configuration file to inspect."),
+    ] = DEFAULT_CONFIG_PATH,
+    deep: Annotated[
+        bool,
+        typer.Option("--deep", help="Run bounded Docker, write, and disk-space probes."),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit stable machine-readable output."),
+    ] = False,
+) -> None:
+    """Check Milestone 1 host safety without changing production."""
+    try:
+        loaded = load_configuration(config_path)
+        report = run_doctor(loaded, config_path=config_path, deep=deep)
+    except DployDBError as error:
+        abort_with_error(error, json_output=json_output)
+    except Exception:
+        abort_with_error(_internal_error(), json_output=json_output)
+    typer.echo(
+        _render_doctor(report, json_output=json_output),
+        err=not json_output and report.exit_code != 0,
+    )
+    if report.exit_code != 0:
+        raise typer.Exit(code=report.exit_code)
+
+
+@app.command("status")
+def status_command(
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", "-c", help="Configuration file whose state is inspected."),
+    ] = DEFAULT_CONFIG_PATH,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit stable machine-readable output."),
+    ] = False,
+) -> None:
+    """Explain lock and durable operation state without modifying it."""
+    try:
+        loaded = load_configuration(config_path)
+        report = inspect_runtime_status(loaded.config, secrets=loaded.secrets)
+    except DployDBError as error:
+        abort_with_error(error, json_output=json_output)
+    except Exception:
+        abort_with_error(_internal_error(), json_output=json_output)
+    typer.echo(
+        _render_status(report, json_output=json_output),
+        err=not json_output and report.exit_code != 0,
+    )
+    if report.exit_code != 0:
+        raise typer.Exit(code=report.exit_code)

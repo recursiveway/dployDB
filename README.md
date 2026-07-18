@@ -4,7 +4,7 @@ DployDB is being built as a deployment-safety tool for applications that use one
 
 ## Current status
 
-Milestones 0 and 1A–1E provide:
+Milestones 0 and 1 provide:
 
 - an installable `dploydb` CLI with help and version commands;
 - strict, duplicate-safe configuration parsing with environment interpolation;
@@ -12,13 +12,18 @@ Milestones 0 and 1A–1E provide:
 - `dploydb init`, which creates a valid mode-`0600` starter file without overwriting;
 - atomic generic operation manifests and append-only, redacted event logs;
 - a durable `fcntl.flock` deployment lock with atomic owner metadata and stale-owner diagnosis;
+- bounded, redacted subprocess execution with process-group timeout cleanup;
+- `dploydb doctor`, with layered host checks and explicit deferred checks;
+- read-only `dploydb status`, including active, interrupted, stale, and recovery-required state;
 - a deterministic Docker Compose demo application;
 - working v1 and v2 release fixtures;
 - a deliberately broken migration fixture;
 - a deliberately unhealthy application fixture;
 - real SQLite reads, writes, and data-preserving migration behavior.
 
-The demo controller is **not** the DployDB deployment engine. Bounded subprocess orchestration, `doctor`, `status`, verified backups, migration rehearsal, candidate isolation, production cutover, rollback, and recovery are not implemented yet.
+The demo controller is **not** the DployDB deployment engine. Verified backups,
+migration rehearsal, candidate isolation, production cutover, rollback, and
+recovery are not implemented yet.
 
 ## Prerequisites
 
@@ -188,5 +193,31 @@ assigned to the later `doctor` slice.
 
 `demo/dploydb.yaml` is another valid example for the deterministic fixture. Its
 `/srv/dploydb-demo` paths and placeholder traffic hooks must be adapted before
-host validation or real use. See `IMPLEMENTATION_PLAN.md` for the complete
-safety requirements and milestone order.
+host validation or real use.
+
+Run the implemented host checks with:
+
+```bash
+uv run dploydb doctor --config /absolute/path/to/dploydb.yaml
+uv run dploydb doctor --config /absolute/path/to/dploydb.yaml --deep
+```
+
+Normal mode checks configuration, required paths and executables, Docker and
+Compose CLI availability, candidate-port availability, lock ownership, and
+durable operation state. Deep mode additionally performs cleaned-up write
+probes, disk-space checks, Docker daemon inspection, and Compose service
+validation. Both modes explicitly report SQLite integrity, remote storage,
+migration execution, application health, and traffic execution as skipped;
+those checks remain assigned to later milestones.
+
+Inspect current state without creating, repairing, or deleting state files:
+
+```bash
+uv run dploydb status --config /absolute/path/to/dploydb.yaml
+uv run dploydb status --config /absolute/path/to/dploydb.yaml --json
+```
+
+`status` exits `0` for coherent idle or active state and `60` for interrupted,
+stale, contradictory, corrupt, or recovery-required state. See
+`IMPLEMENTATION_PLAN.md` for the complete safety requirements and milestone
+order.

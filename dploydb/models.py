@@ -59,6 +59,24 @@ class LockOwnerState(StrEnum):
     RELEASED = "released"
 
 
+class DiagnosticOutcome(StrEnum):
+    """Stable outcome values emitted by host diagnostics."""
+
+    PASSED = "passed"
+    WARNING = "warning"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class RuntimeStatus(StrEnum):
+    """Read-only summary of the deployment lock and durable operation state."""
+
+    IDLE = "idle"
+    ACTIVE = "active"
+    INTERRUPTED = "interrupted"
+    RECOVERY_REQUIRED = "recovery_required"
+
+
 class DurableModel(BaseModel):
     """Strict immutable base for versioned JSON state records."""
 
@@ -206,6 +224,15 @@ class OperationEvent(DurableModel):
     @field_serializer("timestamp")
     def serialize_event_timestamp(self, value: datetime) -> str:
         return serialize_utc_timestamp(value)
+
+
+class DiagnosticCheck(DurableModel):
+    """One stable, redacted doctor check result."""
+
+    check_id: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,127}$")
+    outcome: DiagnosticOutcome
+    message: str = Field(min_length=1, max_length=4096)
+    evidence: dict[str, Any] = Field(default_factory=dict)
 
 
 class FailureData(TypedDict):
