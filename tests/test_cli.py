@@ -24,6 +24,8 @@ def test_help_succeeds() -> None:
     assert "init" in result.output
     assert "doctor" in result.output
     assert "status" in result.output
+    assert "backup" in result.output
+    assert "verify" in result.output
     assert "Traceback" not in result.output
 
 

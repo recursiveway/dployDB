@@ -18,11 +18,19 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
+from typer.testing import CliRunner
+
+from dploydb.cli import app as dploydb_cli
+from dploydb.config import STARTER_CONFIGURATION, load_configuration
+from dploydb.restore import restore_stopped_database
+from dploydb.storage.local import LocalBackupStorage
 
 ROOT = Path(__file__).resolve().parents[2]
 RELEASES = ROOT / "demo" / "releases"
 PROCESS_TIMEOUT_SECONDS = 20
 HTTP_TIMEOUT_SECONDS = 2
+cli_runner = CliRunner()
 
 
 def create_database(path: Path) -> None:
@@ -145,6 +153,30 @@ def database_snapshot(database: Path) -> tuple[str, int, list[tuple[str]], list[
         ).fetchall()
         rows = connection.execute("SELECT id, body FROM notes ORDER BY id").fetchall()
     return checksum, version, schema, rows
+
+
+def dploydb_configuration(tmp_path: Path, database: Path) -> Path:
+    value: dict[str, Any] = yaml.safe_load(STARTER_CONFIGURATION)
+    candidate_port = available_port()
+    value["project"] = "demo-restore"
+    value["state_directory"] = str(tmp_path / "dploydb-state")
+    value["database"]["path"] = str(database)
+    value["migration"]["command"] = [sys.executable, "-c", "pass"]
+    value["application"]["compose_file"] = str(ROOT / "demo" / "compose.yaml")
+    value["application"]["candidate_port"] = candidate_port
+    value["application"]["candidate_health_url"] = f"http://127.0.0.1:{candidate_port}/health"
+    value["application"].pop("smoke_command", None)
+    value["backup"]["local_directory"] = str(tmp_path / "backups")
+    for name in (
+        "maintenance_on_command",
+        "maintenance_off_command",
+        "activate_new_command",
+        "activate_old_command",
+    ):
+        value["traffic"][name] = [sys.executable, "-c", "pass"]
+    path = tmp_path / "dploydb.yaml"
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    return path
 
 
 def test_v1_http_io_is_real_and_persists_across_restart(tmp_path: Path) -> None:
@@ -291,3 +323,51 @@ def test_http_validation_contract(tmp_path: Path) -> None:
             400,
             {"error": "input"},
         )
+
+
+def test_stopped_demo_application_restores_verified_backup_end_to_end(tmp_path: Path) -> None:
+    database = tmp_path / "app.db"
+    create_database(database)
+    assert run_migration(database, "v1").returncode == 0
+    config_path = dploydb_configuration(tmp_path, database)
+    loaded = load_configuration(config_path)
+
+    with running_app(database, "v1") as port:
+        assert json_request(port, "/notes", payload={"body": "kept in selected backup"})[0] == 201
+
+    backup_result = cli_runner.invoke(
+        dploydb_cli,
+        ["backup", "--config", str(config_path), "--json"],
+    )
+    assert backup_result.exit_code == 0, backup_result.output
+    selected_backup_id = json.loads(backup_result.output)["backup_id"]
+    verify_result = cli_runner.invoke(
+        dploydb_cli,
+        ["verify", selected_backup_id, "--config", str(config_path), "--json"],
+    )
+    assert verify_result.exit_code == 0, verify_result.output
+
+    with running_app(database, "v1") as port:
+        assert json_request(port, "/notes", payload={"body": "written after backup"})[0] == 201
+
+    restored = restore_stopped_database(
+        loaded,
+        selected_backup_id,
+        application_stopped=True,
+    )
+
+    with running_app(database, "v1") as port:
+        assert request(port, "/health")[0] == 200
+        assert request(port, "/notes") == (
+            200,
+            [{"id": 1, "body": "kept in selected backup"}],
+        )
+
+    pre_restore = LocalBackupStorage(loaded.config.backup.local_directory).get(
+        restored.pre_restore_backup_id
+    )
+    with sqlite3.connect(pre_restore.database_path) as connection:
+        assert connection.execute("SELECT body FROM notes ORDER BY id").fetchall() == [
+            ("kept in selected backup",),
+            ("written after backup",),
+        ]

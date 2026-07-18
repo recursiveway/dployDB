@@ -4,7 +4,7 @@ DployDB is being built as a deployment-safety tool for applications that use one
 
 ## Current status
 
-Milestones 0 and 1 provide:
+Milestones 0 through 2 provide:
 
 - an installable `dploydb` CLI with help and version commands;
 - strict, duplicate-safe configuration parsing with environment interpolation;
@@ -13,17 +13,22 @@ Milestones 0 and 1 provide:
 - atomic generic operation manifests and append-only, redacted event logs;
 - a durable `fcntl.flock` deployment lock with atomic owner metadata and stale-owner diagnosis;
 - bounded, redacted subprocess execution with process-group timeout cleanup;
-- `dploydb doctor`, with layered host checks and explicit deferred checks;
+- `dploydb doctor`, with layered host checks, bounded SQLite verification, and explicit deferred checks;
 - read-only `dploydb status`, including active, interrupted, stale, and recovery-required state;
+- SQLite online backups that remain consistent while the application is writing;
+- immutable mode-`0600` backup databases and metadata under a mode-`0700` directory;
+- `dploydb backup` and read-only `dploydb verify <backup-id>` with stable JSON output;
+- an internal stopped-application restore engine that creates a verified pre-restore backup and
+  restores it automatically if replacement fails;
 - a deterministic Docker Compose demo application;
 - working v1 and v2 release fixtures;
 - a deliberately broken migration fixture;
 - a deliberately unhealthy application fixture;
 - real SQLite reads, writes, and data-preserving migration behavior.
 
-The demo controller is **not** the DployDB deployment engine. Verified backups,
-migration rehearsal, candidate isolation, production cutover, rollback, and
-recovery are not implemented yet.
+The demo controller is **not** the DployDB deployment engine. Migration
+rehearsal, candidate isolation, production cutover, application rollback, the
+public manual-restore command, and crash recovery are not implemented yet.
 
 ## Prerequisites
 
@@ -203,12 +208,13 @@ uv run dploydb doctor --config /absolute/path/to/dploydb.yaml --deep
 ```
 
 Normal mode checks configuration, required paths and executables, Docker and
-Compose CLI availability, candidate-port availability, lock ownership, and
-durable operation state. Deep mode additionally performs cleaned-up write
-probes, disk-space checks, Docker daemon inspection, and Compose service
-validation. Both modes explicitly report SQLite integrity, remote storage,
-migration execution, application health, and traffic execution as skipped;
-those checks remain assigned to later milestones.
+Compose CLI availability, candidate-port availability, lock ownership, durable
+operation state, and bounded read-only SQLite `quick_check` and
+`foreign_key_check` results. Deep mode additionally runs SQLite
+`integrity_check`, cleaned-up write probes, disk-space checks, Docker daemon
+inspection, and Compose service validation. Both modes explicitly report
+remote storage, migration execution, application health, and traffic execution
+as skipped; those checks remain assigned to later milestones.
 
 Inspect current state without creating, repairing, or deleting state files:
 
@@ -221,3 +227,18 @@ uv run dploydb status --config /absolute/path/to/dploydb.yaml --json
 stale, contradictory, corrupt, or recovery-required state. See
 `IMPLEMENTATION_PLAN.md` for the complete safety requirements and milestone
 order.
+
+Create and independently reverify a local backup:
+
+```bash
+uv run dploydb backup --config /absolute/path/to/dploydb.yaml
+uv run dploydb backup --config /absolute/path/to/dploydb.yaml --json
+uv run dploydb verify backup_0123456789abcdef0123456789abcdef \
+  --config /absolute/path/to/dploydb.yaml
+```
+
+The configured backup directory must be owned privately with mode `0700` when
+it already exists. Backup database and metadata files are written with mode
+`0600`; metadata is published last and is the success marker. `verify` accepts
+only committed backup IDs in Milestone 2. Public release restore and remote
+upload remain assigned to later milestones.

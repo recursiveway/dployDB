@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+import sqlite3
 import stat
 import sys
 from datetime import UTC, datetime
@@ -49,7 +50,8 @@ def _write_executable(path: Path, body: str) -> None:
 def configured_project(tmp_path: Path, *, secret: str | None = None) -> tuple[Path, dict[str, str]]:
     database = tmp_path / "data" / "app.db"
     database.parent.mkdir()
-    database.write_bytes(b"not-opened-by-milestone-1")
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE fixture (id INTEGER PRIMARY KEY)")
     compose = tmp_path / "compose.yaml"
     compose.write_text("services:\n  app:\n    image: example\n", encoding="utf-8")
     binary_directory = tmp_path / "bin"
@@ -262,7 +264,6 @@ def test_standard_and_deep_doctor_pass_and_mark_future_checks_skipped(tmp_path: 
         for check in deep.checks
         if check.check_id
         in {
-            "sqlite_integrity",
             "remote_storage",
             "migration_execution",
             "application_health",
@@ -270,6 +271,9 @@ def test_standard_and_deep_doctor_pass_and_mark_future_checks_skipped(tmp_path: 
         }
     }
     assert set(deferred.values()) == {DiagnosticOutcome.SKIPPED}
+    sqlite_check = next(check for check in deep.checks if check.check_id == "sqlite_integrity")
+    assert sqlite_check.outcome is DiagnosticOutcome.PASSED
+    assert sqlite_check.evidence["integrity_check_passed"] is True
     assert not list(tmp_path.rglob(".dploydb-doctor-*.tmp"))
 
 
@@ -356,7 +360,7 @@ def test_cli_json_status_and_doctor_are_stable_and_redacted(tmp_path: Path) -> N
     doctor_payload = json.loads(doctor_result.output)
     status_payload = json.loads(status_result.output)
     assert doctor_payload["command"] == "doctor"
-    assert doctor_payload["summary"]["skipped"] == 5
+    assert doctor_payload["summary"]["skipped"] == 4
     assert status_payload["command"] == "status"
     assert status_payload["status"] == "idle"
     assert secret not in doctor_result.output

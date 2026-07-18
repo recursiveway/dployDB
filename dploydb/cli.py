@@ -8,6 +8,7 @@ from typing import Annotated, NoReturn
 import typer
 from rich.console import Console
 
+from dploydb.backup import create_configured_backup, verify_configured_backup
 from dploydb.config import DEFAULT_CONFIG_PATH, initialize_configuration, load_configuration
 from dploydb.diagnostics import (
     DoctorReport,
@@ -15,8 +16,9 @@ from dploydb.diagnostics import (
     inspect_runtime_status,
     run_doctor,
 )
-from dploydb.errors import DployDBError, InternalError
-from dploydb.models import DiagnosticOutcome, FailurePayload
+from dploydb.errors import DployDBError, InternalError, redact_error
+from dploydb.models import BackupArtifact, DiagnosticOutcome, FailurePayload
+from dploydb.redaction import SecretRegistry
 
 app = typer.Typer(
     help="Deployment safety for SQLite applications.",
@@ -118,6 +120,53 @@ def _render_status(report: StatusReport, *, json_output: bool) -> str:
     else:
         lines.append(f"Next safe action: {report.next_safe_action}")
     return "\n".join(lines)
+
+
+def _backup_result(
+    artifact: BackupArtifact,
+    *,
+    command: str,
+    secrets: SecretRegistry,
+) -> dict[str, object]:
+    metadata = artifact.metadata
+    return {
+        "ok": True,
+        "command": command,
+        "project": secrets.redact_text(metadata.project),
+        "backup_id": metadata.backup_id,
+        "database_path": secrets.redact_text(str(artifact.database_path)),
+        "metadata_path": secrets.redact_text(str(artifact.metadata_path)),
+        "size_bytes": metadata.size_bytes,
+        "sha256": metadata.sha256,
+        "purpose": metadata.purpose.value,
+        "created_at": metadata.model_dump(mode="json")["created_at"],
+        "completed_at": metadata.model_dump(mode="json")["completed_at"],
+        "checks": metadata.sqlite.model_dump(mode="json"),
+    }
+
+
+def _render_backup_result(
+    artifact: BackupArtifact,
+    *,
+    command: str,
+    json_output: bool,
+    secrets: SecretRegistry,
+) -> str:
+    result = _backup_result(artifact, command=command, secrets=secrets)
+    if json_output:
+        return json.dumps(result, sort_keys=True, separators=(",", ":"))
+    action = "created" if command == "backup" else "verified"
+    return "\n".join(
+        (
+            f"DployDB backup {action}.",
+            f"Project: {result['project']}",
+            f"Backup ID: {result['backup_id']}",
+            f"Database: {result['database_path']}",
+            f"Size: {result['size_bytes']} bytes",
+            f"SHA-256: {result['sha256']}",
+            "SQLite checks: passed",
+        )
+    )
 
 
 def _version_callback(value: bool) -> None:
@@ -239,3 +288,68 @@ def status_command(
     )
     if report.exit_code != 0:
         raise typer.Exit(code=report.exit_code)
+
+
+@app.command("backup")
+def backup_command(
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", "-c", help="Configuration file for the backup."),
+    ] = DEFAULT_CONFIG_PATH,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit stable machine-readable output."),
+    ] = False,
+) -> None:
+    """Create and verify one consistent local SQLite backup."""
+    loaded = None
+    try:
+        loaded = load_configuration(config_path)
+        artifact = create_configured_backup(loaded)
+    except DployDBError as error:
+        if loaded is not None:
+            error = redact_error(error, secrets=loaded.secrets)
+        abort_with_error(error, json_output=json_output)
+    except Exception:
+        abort_with_error(_internal_error(), json_output=json_output)
+    typer.echo(
+        _render_backup_result(
+            artifact,
+            command="backup",
+            json_output=json_output,
+            secrets=loaded.secrets,
+        )
+    )
+
+
+@app.command("verify")
+def verify_command(
+    backup_id: Annotated[str, typer.Argument(help="Committed local backup ID to verify.")],
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", "-c", help="Configuration file for backup storage."),
+    ] = DEFAULT_CONFIG_PATH,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit stable machine-readable output."),
+    ] = False,
+) -> None:
+    """Reverify one committed local backup without modifying state."""
+    loaded = None
+    try:
+        loaded = load_configuration(config_path)
+        artifact = verify_configured_backup(loaded, backup_id)
+    except DployDBError as error:
+        if loaded is not None:
+            error = redact_error(error, secrets=loaded.secrets)
+        abort_with_error(error, json_output=json_output)
+    except Exception:
+        abort_with_error(_internal_error(), json_output=json_output)
+    typer.echo(
+        _render_backup_result(
+            artifact,
+            command="verify",
+            json_output=json_output,
+            secrets=loaded.secrets,
+        )
+    )

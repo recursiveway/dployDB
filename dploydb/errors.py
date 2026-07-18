@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import ClassVar, Final
 
 from dploydb.models import FailurePayload
+from dploydb.redaction import SecretRegistry
 
 
 class ExitCode(IntEnum):
@@ -124,3 +125,16 @@ class InternalError(DployDBError):
     """An unexpected failure converted at the outer CLI boundary."""
 
     kind = ErrorKind.INTERNAL_ERROR
+
+
+def redact_error(error: DployDBError, *, secrets: SecretRegistry) -> DployDBError:
+    """Rebuild an expected error after redacting every user-visible text field."""
+    return type(error)(
+        secrets.redact_text(error.payload.what_failed),
+        production_changed=error.payload.production_changed,
+        previous_application_running=error.payload.previous_application_running,
+        log_path=(
+            None if error.payload.log_path is None else secrets.redact_text(error.payload.log_path)
+        ),
+        next_safe_action=secrets.redact_text(error.payload.next_safe_action),
+    )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, Literal, NewType, Self, TypedDict
 from uuid import uuid4
 
@@ -50,6 +51,15 @@ class OperationStatus(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED_SAFE = "failed_safe"
     RECOVERY_REQUIRED = "recovery_required"
+
+
+class BackupPurpose(StrEnum):
+    """Why an immutable verified backup was created."""
+
+    STANDALONE = "standalone"
+    PRE_RESTORE = "pre_restore"
+    REHEARSAL = "rehearsal"
+    FINAL = "final"
 
 
 class LockOwnerState(StrEnum):
@@ -235,6 +245,124 @@ class DiagnosticCheck(DurableModel):
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
+class SQLiteVerification(DurableModel):
+    """Bounded read-only evidence that a SQLite database passed required checks."""
+
+    schema_version: Literal[1] = 1
+    quick_check_passed: Literal[True] = True
+    foreign_key_check_passed: Literal[True] = True
+    integrity_check_passed: Literal[True] | None = None
+    checked_at: datetime
+    duration_seconds: float = Field(ge=0)
+
+    @field_validator("checked_at")
+    @classmethod
+    def normalize_checked_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @field_serializer("checked_at")
+    def serialize_checked_at(self, value: datetime) -> str:
+        return serialize_utc_timestamp(value)
+
+
+class BackupMetadata(DurableModel):
+    """Metadata commit marker for one immutable verified local backup."""
+
+    schema_version: Literal[1] = 1
+    backup_id: str = Field(pattern=r"^backup_[0-9a-f]{32}$")
+    project: str = Field(min_length=1, max_length=64)
+    purpose: BackupPurpose
+    source_database_path: Path
+    database_file_name: str = Field(pattern=r"^backup_[0-9a-f]{32}\.db$")
+    size_bytes: int = Field(gt=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sqlite: SQLiteVerification
+    operation_id: str | None = Field(default=None, pattern=r"^op_[0-9a-f]{32}$")
+    created_at: datetime
+    completed_at: datetime
+
+    @field_validator("source_database_path")
+    @classmethod
+    def validate_source_path(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("source database path must be absolute")
+        return value
+
+    @field_validator("created_at", "completed_at")
+    @classmethod
+    def normalize_backup_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @field_serializer("created_at", "completed_at")
+    def serialize_backup_timestamp(self, value: datetime) -> str:
+        return serialize_utc_timestamp(value)
+
+    @model_validator(mode="after")
+    def validate_backup_identity(self) -> Self:
+        if self.database_file_name != f"{self.backup_id}.db":
+            raise ValueError("database filename must match backup ID")
+        if self.completed_at < self.created_at:
+            raise ValueError("completed_at must not precede created_at")
+        return self
+
+
+class BackupArtifact(DurableModel):
+    """Resolved paths and metadata for one committed local backup."""
+
+    metadata: BackupMetadata
+    database_path: Path
+    metadata_path: Path
+
+    @field_validator("database_path", "metadata_path")
+    @classmethod
+    def validate_artifact_path(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("backup artifact paths must be absolute")
+        return value
+
+    @model_validator(mode="after")
+    def validate_artifact_identity(self) -> Self:
+        if self.database_path.name != self.metadata.database_file_name:
+            raise ValueError("database artifact path does not match metadata")
+        if self.metadata_path.name != f"{self.metadata.backup_id}.json":
+            raise ValueError("metadata artifact path does not match backup ID")
+        if self.database_path.parent != self.metadata_path.parent:
+            raise ValueError("backup database and metadata must share a directory")
+        return self
+
+
+class RestoreResult(DurableModel):
+    """Durable result returned by the internal stopped-application restore engine."""
+
+    selected_backup_id: str = Field(pattern=r"^backup_[0-9a-f]{32}$")
+    pre_restore_backup_id: str = Field(pattern=r"^backup_[0-9a-f]{32}$")
+    database_path: Path
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    restored_at: datetime
+
+    @field_validator("database_path")
+    @classmethod
+    def validate_restore_path(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("restored database path must be absolute")
+        return value
+
+    @field_validator("restored_at")
+    @classmethod
+    def normalize_restored_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @field_serializer("restored_at")
+    def serialize_restored_at(self, value: datetime) -> str:
+        return serialize_utc_timestamp(value)
+
+
 class FailureData(TypedDict):
     """Stable JSON-compatible failure shape used by human and CI output."""
 
@@ -290,6 +418,11 @@ class FailurePayload:
 def new_operation_id() -> OperationId:
     """Create an opaque identifier suitable for durable operation records."""
     return OperationId(f"op_{uuid4().hex}")
+
+
+def new_backup_id() -> str:
+    """Create an opaque identifier for one immutable backup artifact."""
+    return f"backup_{uuid4().hex}"
 
 
 def utc_now() -> datetime:

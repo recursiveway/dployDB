@@ -35,12 +35,13 @@ from dploydb.models import (
     utc_now,
 )
 from dploydb.redaction import JsonValue, SecretRegistry
+from dploydb.sqlite_checks import verify_sqlite_database
 from dploydb.state import DIRECTORY_MODE, StateStore
+from dploydb.storage.local import DIRECTORY_MODE as BACKUP_DIRECTORY_MODE
 from dploydb.subprocesses import CommandResult, SubprocessRunner
 
 DOCTOR_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
 _DEFERRED_CHECKS: Final[tuple[tuple[str, str], ...]] = (
-    ("sqlite_integrity", "SQLite integrity checks begin in Milestone 2."),
     ("remote_storage", "Remote storage checks begin in Milestone 7."),
     ("migration_execution", "Migration execution begins in Milestone 3."),
     ("application_health", "Application health checks begin in Milestone 4."),
@@ -264,7 +265,7 @@ def run_doctor(
     environment: Mapping[str, str] | None = None,
     runner: SubprocessRunner | None = None,
 ) -> DoctorReport:
-    """Run the Milestone 1 host checks without executing production behavior."""
+    """Run bounded host and SQLite checks without executing production behavior."""
     config = loaded.config
     secrets = loaded.secrets
     checked_at = serialize_utc_timestamp(utc_now())
@@ -312,7 +313,42 @@ def run_doctor(
         )
     )
 
-    _check_regular_readable(checks, secrets, "database_file", config.database.path)
+    database_readable = _check_regular_readable(
+        checks, secrets, "database_file", config.database.path
+    )
+    if database_readable:
+        try:
+            sqlite_evidence = verify_sqlite_database(config.database.path, deep=deep)
+        except DployDBError as error:
+            checks.append(
+                _check(
+                    secrets,
+                    "sqlite_integrity",
+                    DiagnosticOutcome.FAILED,
+                    error.payload.what_failed,
+                    {"path": str(config.database.path), "deep": deep},
+                )
+            )
+        else:
+            checks.append(
+                _check(
+                    secrets,
+                    "sqlite_integrity",
+                    DiagnosticOutcome.PASSED,
+                    "SQLite integrity checks passed.",
+                    sqlite_evidence.model_dump(mode="json"),
+                )
+            )
+    else:
+        checks.append(
+            _check(
+                secrets,
+                "sqlite_integrity",
+                DiagnosticOutcome.SKIPPED,
+                "SQLite checks were skipped because the database file check failed.",
+                {"path": str(config.database.path), "deep": deep},
+            )
+        )
     _check_regular_readable(checks, secrets, "compose_file", config.application.compose_file)
     _check_directory_destination(
         checks,
@@ -333,7 +369,7 @@ def run_doctor(
         secrets,
         "backup_directory",
         config.backup.local_directory,
-        required_mode=None,
+        required_mode=BACKUP_DIRECTORY_MODE,
     )
 
     configured_commands: tuple[tuple[str, Sequence[str]], ...] = (
@@ -643,7 +679,7 @@ def _check_regular_readable(
     secrets: SecretRegistry,
     check_id: str,
     path: Path,
-) -> None:
+) -> bool:
     try:
         details = path.stat()
         valid = stat.S_ISREG(details.st_mode) and os.access(path, os.R_OK)
@@ -660,6 +696,7 @@ def _check_regular_readable(
             {"path": str(path)},
         )
     )
+    return valid
 
 
 def _nearest_existing_directory(path: Path) -> Path | None:

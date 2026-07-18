@@ -8,6 +8,8 @@ checks belong to ``doctor`` in Milestone 1G.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 from collections.abc import Mapping
@@ -292,6 +294,19 @@ class LoadedConfiguration:
 
     config: DployDBConfig
     secrets: SecretRegistry
+
+
+def configuration_fingerprint(config: DployDBConfig, *, secrets: SecretRegistry) -> str:
+    """Hash a canonical redacted configuration without persisting resolved secrets."""
+    safe = secrets.redact(config.model_dump(mode="json"))
+    payload = json.dumps(
+        safe,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 class _DuplicateKeyError(yaml.YAMLError):
