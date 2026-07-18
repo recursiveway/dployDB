@@ -51,6 +51,10 @@ _OPERATION_ID = re.compile(r"^op_[0-9a-f]{32}$")
 CommandEvidenceSink = Callable[[MigrationCommandEvidence], None]
 
 
+class MigrationWorkspaceCleanupError(OperationFailedError):
+    """A private rehearsal workspace could not be proven clean."""
+
+
 @dataclass(frozen=True, slots=True)
 class ActiveMigrationRehearsal:
     """A verified migrated database that exists only inside its context."""
@@ -74,7 +78,7 @@ def rehearse_configured_migration(
     lock = DeploymentLock(config.state_directory, secrets=secrets)
 
     with lock:
-        _require_clean_operation_state(lock, store)
+        require_clean_operation_state(lock, store)
         operation = store.create_operation(
             operation_type="rehearsal",
             project=config.project,
@@ -267,7 +271,7 @@ def migration_rehearsal(
                     if isinstance(primary_error, DployDBError)
                     else str(primary_error)
                 )
-                raise OperationFailedError(
+                raise MigrationWorkspaceCleanupError(
                     detail + f"; rehearsal workspace cleanup also failed: {cleanup_error}",
                     production_changed=False,
                     previous_application_running=None,
@@ -486,8 +490,8 @@ def _cleanup_workspace(workspace: Path | None) -> str | None:
     return None
 
 
-def _workspace_cleanup_error(detail: str, log_path: Path) -> OperationFailedError:
-    return OperationFailedError(
+def _workspace_cleanup_error(detail: str, log_path: Path) -> MigrationWorkspaceCleanupError:
+    return MigrationWorkspaceCleanupError(
         f"rehearsal workspace cleanup failed: {detail}",
         production_changed=False,
         previous_application_running=None,
@@ -499,7 +503,8 @@ def _workspace_cleanup_error(detail: str, log_path: Path) -> OperationFailedErro
     )
 
 
-def _require_clean_operation_state(lock: DeploymentLock, store: StateStore) -> None:
+def require_clean_operation_state(lock: DeploymentLock, store: StateStore) -> None:
+    """Refuse new work while durable evidence requires diagnosis or recovery."""
     if lock.previous_owner is not None and lock.previous_owner.state is LockOwnerState.ACTIVE:
         raise RecoveryRequiredError(
             "A prior operation left active lock-owner evidence.",

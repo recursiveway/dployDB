@@ -37,13 +37,20 @@ The product must be useful after the hackathon. Do not build fake progress scree
 - **Completed slice:** Milestone 4A — isolated Docker Compose candidate runner,
   live isolation inspection, bounded logs, and proven idempotent cleanup
   (`COMPLETE` on 2026-07-18).
-- **Next slice:** Milestone 4B — bounded HTTP readiness and optional smoke checks.
-- **Planned Milestone 4 slices:** 4A isolated Docker Compose runner, 4B bounded
+- **Completed slice:** Milestone 4B — bounded HTTPX readiness and optional
+  process-group smoke checks (`COMPLETE` on 2026-07-19).
+- **Completed slice:** Milestone 4C — durable candidate-validation orchestration
+  and the real old-application-continuity gate (`COMPLETE` on 2026-07-19).
+- **Completed milestone:** Milestone 4 — candidate application validation against
+  the checked rehearsal database (`COMPLETE` on 2026-07-19).
+- **Next slice:** Milestone 5 — controlled production cutover and automatic
+  pre-traffic application/database rollback.
+- **Milestone 4 slices:** 4A isolated Docker Compose runner, 4B bounded
   HTTP readiness and optional smoke checks, and 4C durable candidate-validation
   orchestration plus the real old-application-continuity gate.
-- **Not yet implemented:** Candidate orchestration, cutover, application rollback,
-  public manual restore, crash recovery, remote storage, and retention from
-  Milestone 4 onward.
+- **Not yet implemented:** Production cutover, application rollback, public
+  manual restore, crash recovery, remote storage, and retention from Milestone 5
+  onward.
 - **Dependency workflow:** Use uv for project dependencies and development commands. Support and verify `pipx install .` as the isolated end-user installation path.
 - **Repository outcome:** Every existing `.gitignore` rule remains, including `IMPLEMENTATION_PLAN.md`; `demo/.state/` was added for generated demo databases.
 
@@ -797,12 +804,14 @@ Planned on 2026-07-18:
 
 Progress tracker:
 
-- [ ] Milestone 4 overall — complete only after slices 4A through 4C and the
-  final real-Docker continuity/cleanup gate pass.
+- [x] Milestone 4 overall — `COMPLETE` on 2026-07-19 after slices 4A through 4C
+  and the final real-Docker continuity/cleanup gate passed.
   - [x] 4A — isolated Docker Compose candidate runner and lifecycle evidence
     (`COMPLETE` on 2026-07-18).
-  - [ ] 4B — bounded HTTP readiness, optional smoke command, and health evidence.
-  - [ ] 4C — durable rehearsal-plus-candidate orchestration and Milestone 4 gate.
+  - [x] 4B — bounded HTTP readiness, optional smoke command, and health evidence
+    (`COMPLETE` on 2026-07-19).
+  - [x] 4C — durable rehearsal-plus-candidate orchestration and Milestone 4 gate
+    (`COMPLETE` on 2026-07-19).
 
 Tracking rule: complete each slice only after its focused tests, the full suite,
 Ruff, formatting, and mypy pass and exact evidence is recorded here. Do not begin
@@ -897,6 +906,26 @@ remain intentionally unclaimed.
 
 ##### 4B — HTTP readiness and optional smoke checks
 
+Status on 2026-07-19: `COMPLETE`. This slice owns a new typed
+`dploydb/health.py`, the HTTPX runtime dependency, and focused health/smoke
+tests. It uses the existing validated loopback URL, secret registry, and
+bounded process-group runner. It does not own durable state, Docker lifecycle,
+production cutover, or a public deployment command. Milestone 4A was audited
+before this work and its runner, real-Docker isolation checks, configuration
+contract, and cleanup gate remain complete with no repair identified.
+
+Planned 4B evidence:
+
+- Deterministic HTTPX-transport and real-loopback tests for delayed readiness,
+  refusal, unhealthy responses, redirects without following them, bounded
+  oversized bodies, the monotonic overall deadline, cancellation, and secret
+  redaction.
+- Real bounded subprocess tests for smoke success, non-zero exit, start failure,
+  timeout plus descendant cleanup, complete-capture refusal, and proof that the
+  smoke command cannot run before readiness succeeds.
+- Focused tests followed by the full suite, Ruff, formatting, and mypy before
+  4C begins.
+
 - Add a typed health checker with injected HTTPX client/transport and monotonic
   clock boundaries, bounded retry cadence, an overall startup deadline, and
   bounded response evidence. Accept only a real HTTP 2xx response from the
@@ -918,7 +947,43 @@ Slice 4B gate:
 - Smoke tests cover success, non-zero exit, start failure, timeout, descendant
   cleanup, output truncation, and proof that smoke never runs before readiness.
 
+Slice 4B acceptance evidence observed on 2026-07-19:
+
+- `uv run pytest -q tests/unit/test_health.py` — passed (`11 passed in 3.51s`).
+  Coverage includes a real loopback server progressing through HTTP 500 and 503
+  to 204, real connection refusal, deterministic redirect refusal without an
+  external request, a fixed monotonic deadline, cancellation before the first
+  request, bounded oversized-body evidence, and response/transport secret
+  redaction.
+- Smoke coverage used the real bounded process-group runner for successful
+  environment injection, non-zero exit, executable start failure, complete-
+  capture refusal, timeout, and a spawned descendant. The timed-out parent and
+  child were both gone before the result returned, and a failing readiness check
+  proved the smoke executor was never invoked.
+- `uv run pytest -q` — passed (`339 passed in 79.41s`), preserving all existing
+  real SQLite/HTTP, Docker Compose, backup/restore, locking, interruption,
+  process-tree, migration-rehearsal, and candidate-runner coverage.
+- `uv run ruff check .` and `uv run ruff format --check .` — passed (`All checks
+  passed!`; `53 files already formatted`).
+- `uv run mypy dploydb` and `uv run mypy demo` — passed with no issues in `22`
+  package source files and `6` demo source files.
+- `uv lock --check` and `uv sync --locked --check` — passed with `38` resolved
+  packages and `37` checked packages; the locked environment required no
+  changes. HTTPX 0.28.1 is now an explicit runtime dependency.
+
+Slice 4B is complete. Slice 4C is the next allowed work; no durable candidate
+operation, production cutover, traffic mutation, or rollback is claimed by 4B.
+
 ##### 4C — Durable candidate validation and final Milestone 4 gate
+
+Status on 2026-07-19: `COMPLETE`. This slice owns a new typed
+`dploydb/candidate.py`, the minimal shared evidence contracts/refactor needed to
+keep the verified migrated database alive during candidate checks, and focused
+unit plus real-Docker continuity/cleanup tests. One deployment lock and one
+durable operation covers preflight, verified snapshot, migration,
+inspection, health/smoke, bounded logs, candidate cleanup, and rehearsal
+cleanup. No production file, current-application Compose project, or traffic
+hook will be mutated.
 
 - Compose the existing verified snapshot and migration-rehearsal primitives with
   the runner and health checker while the rehearsed database context is alive.
@@ -947,6 +1012,56 @@ Slice 4C and final Milestone 4 gate:
 - Run focused tests, the full suite, Ruff, format check, mypy for package and
   demo, packaging, isolated install verification, and a direct real-demo
   candidate flow before marking Milestone 4 complete.
+
+Slice 4C and final Milestone 4 acceptance evidence observed on 2026-07-19:
+
+- `uv run pytest -q tests/unit/test_candidate.py
+  tests/integration/test_candidate_validation.py
+  tests/integration/test_candidate_runner.py tests/unit/test_health.py` — passed
+  (`25 passed in 21.64s`). The unit gate proves one lock/operation owns snapshot,
+  migration, candidate checks, logs, and cleanup; startup/readiness/smoke
+  rejection with proven cleanup ends `failed_safe`; contradictory inspection,
+  unproven candidate cleanup, and unproven rehearsal-workspace cleanup end
+  `recovery_required`.
+- The real-Docker gate ran working v2, deterministic broken health, an occupied
+  candidate port, and a failing smoke command. Each outcome preserved the
+  production file checksum, schema, `user_version`, and rows. Success ended at
+  `candidate_healthy`; expected health/start/smoke rejection ended durably at
+  `failed_safe` with the exact events path and redacted stage evidence.
+- A real current v1 Compose application remained up during every successful and
+  rejected candidate scenario. A concurrent monitor repeatedly received v1
+  health and read the pre-existing visible SQLite row without one failed request
+  while the isolated candidate used the migrated rehearsal database.
+- `uv run pytest -q
+  tests/integration/test_candidate_validation.py::test_real_v2_candidate_passes_while_current_v1_serves_and_all_evidence_is_clean
+  -vv` — passed (`1 passed in 3.40s`) as the direct deterministic real-demo
+  candidate flow, including optional smoke checks and cross-sink secret scans.
+- Candidate startup, inspection, readiness/smoke, bounded application logs, and
+  cleanup proof are append-only events before the terminal manifest transition.
+  Success is recorded only after both the candidate resources and private
+  rehearsal workspace are proven cleaned. No production Compose, traffic, or
+  cutover command exists in this milestone.
+- Final `uv run pytest -q` — passed (`351 passed in 92.58s`), including all real
+  SQLite/HTTP, Docker Compose, online backup/restore, locking, interruption,
+  process-tree cleanup, migration rehearsal, runner isolation, and Milestone 4
+  continuity paths.
+- `uv run ruff check .` and `uv run ruff format --check .` — passed (`All checks
+  passed!`; `56 files already formatted`). `uv run mypy dploydb` and `uv run
+  mypy demo` passed with no issues in `23` package source files and `6` demo
+  source files.
+- `uv lock --check && uv sync --locked --check` passed with `38` resolved and
+  `37` checked packages. `uv build` rebuilt the sdist and wheel, wheel inspection
+  found both `dploydb/candidate.py` and `dploydb/health.py`, and `uv run python
+  scripts/verify_pipx_install.py` passed.
+- `uv run dploydb --help`, console `--version`, and module `version` passed; both
+  version paths printed `dploydb 0.1.0`, and the CLI intentionally exposes no
+  partial `deploy` command before Milestone 5.
+- Final read-only Docker audits returned no container labeled
+  `io.dploydb.role=candidate` and no network with the Milestone 4 project prefix.
+
+Milestone 4 is complete. Milestone 5 is the next allowed work; production
+migration, maintenance/traffic hooks, application cutover, and automatic
+pre-traffic rollback remain intentionally unclaimed.
 
 ---
 
