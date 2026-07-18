@@ -14,7 +14,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Final, Literal, Self
 from urllib.parse import urlsplit
 
@@ -40,7 +40,9 @@ CONFIG_FILE_MODE = 0o600
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _INTERPOLATION = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _PROJECT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_COMPOSE_SERVICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _LOCAL_HEALTH_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "localhost", "::1"})
+_RESERVED_CANDIDATE_ENVIRONMENT: Final[frozenset[str]] = frozenset({"DPLOYDB_VERSION"})
 
 
 def _configuration_error(what_failed: str) -> ConfigurationError:
@@ -148,6 +150,8 @@ class ApplicationConfig(StrictConfigModel):
     compose_file: AbsolutePath
     service: NonEmptyText
     candidate_port: Port
+    candidate_container_port: Port = 8080
+    database_volume_target: NonEmptyText = "/data"
     candidate_health_url: NonEmptyText
     startup_timeout_seconds: PositiveInt
     smoke_command: ArgumentArray | None = None
@@ -166,7 +170,34 @@ class ApplicationConfig(StrictConfigModel):
         for name, environment_value in value.items():
             if _ENVIRONMENT_NAME.fullmatch(name) is None:
                 raise ValueError("contains an invalid environment-variable name")
+            if name in _RESERVED_CANDIDATE_ENVIRONMENT:
+                raise ValueError(f"must not override reserved environment variable {name}")
             _non_empty_text(environment_value)
+        return value
+
+    @field_validator("service")
+    @classmethod
+    def validate_service_name(cls, value: str, info: ValidationInfo) -> str:
+        if _allow_unresolved(info) and _contains_interpolation(value):
+            return value
+        if _COMPOSE_SERVICE_NAME.fullmatch(value) is None:
+            raise ValueError("must be a safe Docker Compose service name")
+        return value
+
+    @field_validator("database_volume_target")
+    @classmethod
+    def validate_database_volume_target(cls, value: str, info: ValidationInfo) -> str:
+        if _allow_unresolved(info) and _contains_interpolation(value):
+            return value
+        path = PurePosixPath(value)
+        if not path.is_absolute() or path == PurePosixPath("/"):
+            raise ValueError("must be an absolute non-root container directory")
+        if str(path) != value or value.startswith("//"):
+            raise ValueError("must be a normalized container path")
+        if any(part in {".", ".."} for part in path.parts):
+            raise ValueError("must not contain traversal segments")
+        if ":" in value:
+            raise ValueError("must not contain a colon")
         return value
 
     @model_validator(mode="after")
@@ -286,6 +317,14 @@ class DployDBConfig(StrictConfigModel):
                 "start with a letter or digit"
             )
         return value
+
+    @model_validator(mode="after")
+    def validate_reserved_candidate_environment(self) -> Self:
+        if self.database.path_env in _RESERVED_CANDIDATE_ENVIRONMENT:
+            raise ValueError(
+                "database.path_env must not use reserved environment variable DPLOYDB_VERSION"
+            )
+        return self
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,6 +565,9 @@ application:
   compose_file: /srv/example/compose.yaml
   service: app
   candidate_port: 4511
+  # Container-side defaults are explicit so candidate isolation can be inspected.
+  candidate_container_port: 8080
+  database_volume_target: /data
   candidate_health_url: http://127.0.0.1:4511/health
   startup_timeout_seconds: 45
   # Omit smoke_command when the HTTP health check is sufficient.

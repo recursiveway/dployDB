@@ -22,6 +22,8 @@ application:
   compose_file: /srv/dploydb-demo/demo/compose.yaml
   service: app
   candidate_port: 4511
+  candidate_container_port: 8080
+  database_volume_target: /data
   candidate_health_url: http://127.0.0.1:4511/health
   startup_timeout_seconds: 30
   test_mode_env:

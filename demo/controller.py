@@ -140,7 +140,7 @@ def command_environment(context: DemoContext, release: str) -> dict[str, str]:
         {
             "DPLOYDB_DEMO_DATA_DIR": str(context.data_dir.resolve()),
             "DPLOYDB_DEMO_RELEASE_DIR": str(release_path(release, require_exists=False)),
-            "DPLOYDB_DEMO_RELEASE_NAME": release,
+            "DPLOYDB_VERSION": release,
             "DPLOYDB_DEMO_PORT": str(context.port),
             "DPLOYDB_DEMO_UID": host_id("getuid"),
             "DPLOYDB_DEMO_GID": host_id("getgid"),

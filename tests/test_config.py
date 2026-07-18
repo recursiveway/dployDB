@@ -78,6 +78,8 @@ def test_starter_configuration_is_strictly_valid() -> None:
     assert resolved.state_directory == Path("/srv/example/.dploydb")
     assert resolved.database.path == Path("/srv/example/data/app.db")
     assert resolved.migration.command == ("python", "scripts/migrate.py")
+    assert resolved.application.candidate_container_port == 8080
+    assert resolved.application.database_volume_target == "/data"
     assert resolved.application.smoke_command == ("python", "scripts/smoke_test.py")
     assert resolved.application.test_mode_env == {"DPLOYDB_TEST_MODE": "1"}
     assert resolved.backup.remote is not None
@@ -106,6 +108,14 @@ def test_starter_configuration_is_strictly_valid() -> None:
         (("application", "candidate_port"), 0, "greater than or equal to 1"),
         (("application", "candidate_port"), 65536, "less than or equal to 65535"),
         (("application", "candidate_port"), "4511", "valid integer"),
+        (("application", "candidate_container_port"), 0, "greater than or equal to 1"),
+        (("application", "candidate_container_port"), "8080", "valid integer"),
+        (("application", "database_volume_target"), "data", "absolute non-root"),
+        (("application", "database_volume_target"), "/", "absolute non-root"),
+        (("application", "database_volume_target"), "/data/../prod", "traversal"),
+        (("application", "database_volume_target"), "/data/./nested", "normalized"),
+        (("application", "database_volume_target"), "//data", "normalized"),
+        (("application", "database_volume_target"), "/data:unsafe", "colon"),
         (
             ("application", "candidate_health_url"),
             "https://127.0.0.1:4511/health",
@@ -136,6 +146,11 @@ def test_starter_configuration_is_strictly_valid() -> None:
         (("application", "test_mode_env"), [], "must be a mapping"),
         (("application", "test_mode_env"), {"BAD-NAME": "1"}, "invalid environment"),
         (("application", "test_mode_env"), {"GOOD_NAME": 1}, "valid string"),
+        (
+            ("application", "test_mode_env"),
+            {"DPLOYDB_VERSION": "unsafe"},
+            "reserved environment variable",
+        ),
         (("traffic", "maintenance_on_command"), [], "at least one argument"),
         (("traffic", "activate_new_command"), "activate candidate", "argument array"),
         (("backup", "local_directory"), "backups", "absolute path"),
@@ -254,6 +269,26 @@ def test_valid_enabled_remote_configuration_parses() -> None:
     assert config.backup.remote is not None
     assert config.backup.remote.enabled is True
     assert config.backup.remote.bucket == "verified-backups"
+
+
+def test_candidate_container_settings_have_backward_compatible_defaults() -> None:
+    value = valid_mapping()
+    remove_field(value, ("application", "candidate_container_port"))
+    remove_field(value, ("application", "database_volume_target"))
+
+    config = parse_configuration(render(value))
+
+    assert config.application.candidate_container_port == 8080
+    assert config.application.database_volume_target == "/data"
+
+
+def test_database_path_environment_cannot_override_reserved_candidate_version() -> None:
+    value = valid_mapping()
+    nested_set(value, ("database", "path_env"), "DPLOYDB_VERSION")
+
+    error = assert_configuration_error(render(value))
+
+    assert "reserved environment variable DPLOYDB_VERSION" in error.payload.what_failed
 
 
 @pytest.mark.parametrize(

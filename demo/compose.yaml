@@ -6,7 +6,7 @@ services:
     user: "${DPLOYDB_DEMO_UID:?DPLOYDB_DEMO_UID is required}:${DPLOYDB_DEMO_GID:?DPLOYDB_DEMO_GID is required}"
     environment:
       DATABASE_PATH: /data/app.db
-      RELEASE_DIRECTORY: /releases/${DPLOYDB_DEMO_RELEASE_NAME:?DPLOYDB_DEMO_RELEASE_NAME is required}
+      RELEASE_DIRECTORY: /releases/${DPLOYDB_VERSION:?DPLOYDB_VERSION is required}
       PORT: "8080"
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
@@ -17,7 +17,7 @@ services:
         read_only: false
       - type: bind
         source: ${DPLOYDB_DEMO_RELEASE_DIR:?DPLOYDB_DEMO_RELEASE_DIR is required}
-        target: /releases/${DPLOYDB_DEMO_RELEASE_NAME:?DPLOYDB_DEMO_RELEASE_NAME is required}
+        target: /releases/${DPLOYDB_VERSION:?DPLOYDB_VERSION is required}
         read_only: true
     ports:
       - "127.0.0.1:${DPLOYDB_DEMO_PORT:?DPLOYDB_DEMO_PORT is required}:8080"
