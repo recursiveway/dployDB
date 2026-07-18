@@ -4,19 +4,21 @@ DployDB is being built as a deployment-safety tool for applications that use one
 
 ## Current status
 
-Milestones 0 and 1A–1C provide:
+Milestones 0 and 1A–1E provide:
 
 - an installable `dploydb` CLI with help and version commands;
 - strict, duplicate-safe configuration parsing with environment interpolation;
 - in-memory secret registration and output redaction;
 - `dploydb init`, which creates a valid mode-`0600` starter file without overwriting;
+- atomic generic operation manifests and append-only, redacted event logs;
+- a durable `fcntl.flock` deployment lock with atomic owner metadata and stale-owner diagnosis;
 - a deterministic Docker Compose demo application;
 - working v1 and v2 release fixtures;
 - a deliberately broken migration fixture;
 - a deliberately unhealthy application fixture;
 - real SQLite reads, writes, and data-preserving migration behavior.
 
-The demo controller is **not** the DployDB deployment engine. Durable state, locking, bounded subprocess orchestration, `doctor`, `status`, verified backups, migration rehearsal, candidate isolation, production cutover, rollback, and recovery are not implemented yet.
+The demo controller is **not** the DployDB deployment engine. Bounded subprocess orchestration, `doctor`, `status`, verified backups, migration rehearsal, candidate isolation, production cutover, rollback, and recovery are not implemented yet.
 
 ## Prerequisites
 

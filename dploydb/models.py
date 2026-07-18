@@ -52,6 +52,13 @@ class OperationStatus(StrEnum):
     RECOVERY_REQUIRED = "recovery_required"
 
 
+class LockOwnerState(StrEnum):
+    """Lifecycle recorded in the diagnostic deployment-lock owner file."""
+
+    ACTIVE = "active"
+    RELEASED = "released"
+
+
 class DurableModel(BaseModel):
     """Strict immutable base for versioned JSON state records."""
 
@@ -63,6 +70,43 @@ class ProcessIdentity(DurableModel):
 
     pid: int = Field(gt=0)
     hostname: str = Field(min_length=1, max_length=255)
+
+
+class LockOwnerMetadata(DurableModel):
+    """Versioned diagnostic metadata; the kernel lock remains authoritative."""
+
+    schema_version: Literal[1] = 1
+    owner_id: str = Field(pattern=r"^lock_[0-9a-f]{32}$")
+    operation_id: str = Field(pattern=r"^op_[0-9a-f]{32}$")
+    operation_type: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
+    process: ProcessIdentity
+    state: LockOwnerState
+    acquired_at: datetime
+    released_at: datetime | None = None
+
+    @field_validator("acquired_at", "released_at")
+    @classmethod
+    def normalize_lock_timestamp(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @field_serializer("acquired_at", "released_at")
+    def serialize_lock_timestamp(self, value: datetime | None) -> str | None:
+        return None if value is None else serialize_utc_timestamp(value)
+
+    @model_validator(mode="after")
+    def validate_lock_lifecycle(self) -> Self:
+        if self.state is LockOwnerState.ACTIVE:
+            if self.released_at is not None:
+                raise ValueError("active lock owner must not have released_at")
+        elif self.released_at is None:
+            raise ValueError("released lock owner requires released_at")
+        if self.released_at is not None and self.released_at < self.acquired_at:
+            raise ValueError("released_at must not precede acquired_at")
+        return self
 
 
 class SafetyFacts(DurableModel):
