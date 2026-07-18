@@ -116,6 +116,10 @@ class RecoveryRequiredError(DployDBError):
     requires_recovery = True
 
 
+class StateCorruptionError(RecoveryRequiredError):
+    """Durable state is malformed, contradictory, or incomplete."""
+
+
 class InternalError(DployDBError):
     """An unexpected failure converted at the outer CLI boundary."""
 
