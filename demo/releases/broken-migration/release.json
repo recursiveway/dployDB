@@ -1,0 +1,10 @@
+{
+  "name": "broken-migration",
+  "schema": {
+    "from_version": 1,
+    "to_version": 2
+  },
+  "health": {
+    "mode": "ok"
+  }
+}

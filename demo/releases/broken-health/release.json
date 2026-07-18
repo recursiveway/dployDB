@@ -1,0 +1,11 @@
+{
+  "name": "broken-health",
+  "schema": {
+    "from_version": 1,
+    "to_version": 2
+  },
+  "health": {
+    "mode": "broken",
+    "failure_reason": "fixture_broken_health"
+  }
+}

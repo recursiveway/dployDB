@@ -1,0 +1,10 @@
+{
+  "name": "v2",
+  "schema": {
+    "from_version": 1,
+    "to_version": 2
+  },
+  "health": {
+    "mode": "ok"
+  }
+}
