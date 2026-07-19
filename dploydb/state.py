@@ -297,11 +297,24 @@ class StateStore:
 
     def latest_operation(self) -> OperationManifest | None:
         """Return the newest valid operation after validating all durable evidence."""
-        if not self.root.exists():
+        operations = list(self.list_operations())
+        unfinished = [item for item in operations if item.status is OperationStatus.IN_PROGRESS]
+        if len(unfinished) > 1:
+            raise self._corruption_error(
+                "multiple unfinished operations make the active state contradictory",
+                self.operations_directory,
+            )
+        if not operations:
             return None
+        return max(operations, key=lambda item: (item.started_at, item.operation_id))
+
+    def list_operations(self) -> tuple[OperationManifest, ...]:
+        """Return every valid operation newest first without changing state."""
+        if not self.root.exists():
+            return ()
         self._validate_private_directory(self.root)
         if not self.operations_directory.exists():
-            return None
+            return ()
         self._validate_private_directory(self.operations_directory)
 
         operations: list[OperationManifest] = []
@@ -317,15 +330,8 @@ class StateStore:
             manifest, _ = self._read_consistent(entry.name)
             operations.append(manifest)
 
-        unfinished = [item for item in operations if item.status is OperationStatus.IN_PROGRESS]
-        if len(unfinished) > 1:
-            raise self._corruption_error(
-                "multiple unfinished operations make the active state contradictory",
-                self.operations_directory,
-            )
-        if not operations:
-            return None
-        return max(operations, key=lambda item: (item.started_at, item.operation_id))
+        operations.sort(key=lambda item: (item.started_at, item.operation_id), reverse=True)
+        return tuple(operations)
 
     def _read_consistent(self, operation_id: str) -> tuple[OperationManifest, list[OperationEvent]]:
         paths = self.operation_paths(operation_id)

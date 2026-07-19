@@ -122,6 +122,15 @@ def cleanup_evidence(cleanup: ProductionCleanup) -> dict[str, JsonValue]:
 def restart_evidence(restarted: ProductionRestart) -> dict[str, JsonValue]:
     return {
         "handle": cast(JsonValue, restarted.handle.model_dump(mode="json")),
+        "network_refreshes": [
+            {
+                "network_name": refresh.network_name,
+                "aliases": list(refresh.aliases),
+                "disconnect": refresh.disconnect.as_evidence(),
+                "connect": refresh.connect.as_evidence(),
+            }
+            for refresh in restarted.network_refreshes
+        ],
         "command": restarted.command.as_evidence(),
         "inspection": inspection_evidence(restarted.inspection),
     }

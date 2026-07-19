@@ -231,12 +231,23 @@ class ProductionStart:
 
 
 @dataclass(frozen=True, slots=True)
+class ProductionNetworkRefresh:
+    """Exact stopped-container network endpoint refresh evidence."""
+
+    network_name: str
+    aliases: tuple[str, ...]
+    disconnect: CommandResult
+    connect: CommandResult
+
+
+@dataclass(frozen=True, slots=True)
 class ProductionRestart:
     """Exact previous-container restart plus running-state proof."""
 
     handle: ProductionApplicationHandle
     command: CommandResult
     inspection: ProductionInspection
+    network_refreshes: tuple[ProductionNetworkRefresh, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +342,13 @@ class ProductionApplicationRunner(Protocol):
         cancellation_event: threading.Event | None = None,
     ) -> ProductionInspection: ...
 
+    def inspect_live(
+        self,
+        handle: ProductionApplicationHandle,
+        *,
+        cancellation_event: threading.Event | None = None,
+    ) -> ProductionInspection: ...
+
     def stop_current(
         self,
         handle: ProductionApplicationHandle,
@@ -355,6 +373,13 @@ class ProductionApplicationRunner(Protocol):
     ) -> ProductionLogs: ...
 
     def remove_new(self, handle: ProductionApplicationHandle) -> ProductionCleanup: ...
+
+    def prove_release_absent(
+        self,
+        *,
+        release_id: str,
+        version: str,
+    ) -> ProductionCleanupProof: ...
 
     def restart_previous(
         self,

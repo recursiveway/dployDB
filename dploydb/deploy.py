@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
@@ -113,6 +113,7 @@ class _Context:
     dependencies: DeploymentDependencies
     operation_log: Path
     cancellation_event: threading.Event | None
+    fault_injector: Callable[[str], None]
     active_release: ReleaseManifest | None
     previous: ProductionApplicationHandle | None = None
     stopped: ProductionStop | None = None
@@ -137,6 +138,7 @@ def deploy_configured_release(
     candidate_health_checker: HealthChecker | None = None,
     dependencies: DeploymentDependencies | None = None,
     cancellation_event: threading.Event | None = None,
+    fault_injector: Callable[[str], None] | None = None,
 ) -> DeploymentResult:
     """Deploy one release or return a fully proven pre-traffic rollback."""
     release_version = validate_release_identifier(version)
@@ -197,6 +199,7 @@ def deploy_configured_release(
                 dependencies=selected_dependencies,
                 operation_log=operation_log,
                 cancellation_event=cancellation_event,
+                fault_injector=fault_injector or _no_fault,
                 active_release=active_release,
                 previous=(None if active_release is None else active_release.new_application),
             )
@@ -250,6 +253,7 @@ def _run_deployment(
         )
         _resolve_previous_application(context)
         _enable_maintenance(context)
+        context.fault_injector("after_maintenance_enabled")
         assert context.previous is not None
         stopped = context.dependencies.production.stop_current(
             context.previous,
@@ -268,6 +272,7 @@ def _run_deployment(
                 recovery_required=False,
             ),
         )
+        context.fault_injector("after_current_app_stopped")
         final_backup = context.dependencies.database.create_final(
             operation_id=context.operation_id,
             stopped=stopped,
@@ -295,6 +300,22 @@ def _run_deployment(
             )
 
         context.production_may_have_changed = True
+        context.releases.record_recovery_intent(
+            context.release_id,
+            production_migration_started=True,
+        )
+        context.store.transition(
+            context.operation_id,
+            status=OperationStatus.IN_PROGRESS,
+            stage="production_migration_started",
+            message="Production migration is about to start; production may change.",
+            evidence={"final_backup_id": final_backup.metadata.backup_id},
+            safety=SafetyFacts(
+                production_changed=True,
+                previous_application_running=False,
+                recovery_required=False,
+            ),
+        )
         migrated = context.dependencies.database.migrate(
             operation_id=context.operation_id,
             stopped=stopped,
@@ -316,6 +337,7 @@ def _run_deployment(
                 recovery_required=False,
             ),
         )
+        context.fault_injector("after_production_migrated")
         started = context.dependencies.production.start_new(
             operation_id=context.operation_id,
             release_id=context.release_id,
@@ -487,6 +509,23 @@ def _enable_maintenance(context: _Context) -> None:
 
 
 def _activate_new_traffic(context: _Context) -> None:
+    context.traffic_activation_attempted = True
+    context.releases.record_recovery_intent(
+        context.release_id,
+        traffic_activation_attempted=True,
+    )
+    context.store.transition(
+        context.operation_id,
+        status=OperationStatus.IN_PROGRESS,
+        stage="traffic_activation_started",
+        message="New-traffic activation is about to run; routing may become uncertain.",
+        evidence={"release_id": context.release_id},
+        safety=SafetyFacts(
+            production_changed=True,
+            previous_application_running=False,
+            recovery_required=False,
+        ),
+    )
     result = context.dependencies.traffic.activate_new(
         cancellation_event=context.cancellation_event
     )
@@ -494,7 +533,6 @@ def _activate_new_traffic(context: _Context) -> None:
     if not result.passed:
         context.traffic_activation_attempted = _hook_may_have_run(result)
         raise _hook_error(result, context, production_changed=True)
-    context.traffic_activation_attempted = True
     context.traffic_activated = True
     _persist_stage(
         context,
@@ -1030,3 +1068,7 @@ def _failure_record(error: DployDBError) -> FailureRecord:
         log_path=error.payload.log_path,
         next_safe_action=error.payload.next_safe_action,
     )
+
+
+def _no_fault(_stage: str) -> None:
+    return

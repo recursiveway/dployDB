@@ -734,6 +734,8 @@ def test_successful_coordinator_activates_checked_release_in_exact_order(
     assert result.operation.status is OperationStatus.SUCCEEDED
     assert result.release.status is DeploymentState.ACTIVE
     assert result.release.production_changed is True
+    assert result.release.production_migration_started is True
+    assert result.release.traffic_activation_attempted is True
     assert result.release.traffic_activated is True
     assert result.release.final_backup_id is not None
     assert result.release.new_application == selected.production.new
@@ -764,6 +766,11 @@ def test_successful_coordinator_activates_checked_release_in_exact_order(
     )
     pointers = ReleaseStore(loaded.config.state_directory, secrets=loaded.secrets).read_pointers()
     assert pointers is not None and pointers.active_release_id == result.release.release_id
+    events = StateStore(loaded.config.state_directory, secrets=loaded.secrets).read_events(
+        result.operation.operation_id
+    )
+    assert "production_migration_started" in {event.stage for event in events}
+    assert "traffic_activation_started" in {event.stage for event in events}
 
 
 def test_later_deploy_uses_active_release_exact_application_instead_of_discovery(
@@ -957,6 +964,8 @@ def test_activation_start_failure_is_proven_pretraffic_and_rolls_back(tmp_path: 
     result = run_deploy(loaded, config_path, selected)
 
     assert result.rolled_back is True
+    assert result.release.traffic_activation_attempted is True
+    assert result.release.traffic_activated is False
     assert selected.database.calls[-1] == "restore"
     assert selected.production.previous_running is True
     assert database_state(loaded.config.database.path)[1] == 1

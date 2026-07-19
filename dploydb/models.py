@@ -444,6 +444,7 @@ class ReleaseManifest(DurableModel):
     """Atomic durable summary of one deployment release and its safety facts."""
 
     schema_version: Literal[1] = 1
+    recovery_protocol_version: Literal[2] | None = None
     release_id: str = Field(pattern=r"^release_[0-9a-f]{32}$")
     operation_id: str = Field(pattern=r"^op_[0-9a-f]{32}$")
     project: str = Field(min_length=1, max_length=64)
@@ -460,6 +461,8 @@ class ReleaseManifest(DurableModel):
     final_backup_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     production_health_passed: bool = False
     production_changed: bool = False
+    production_migration_started: bool = False
+    traffic_activation_attempted: bool = False
     traffic_activated: bool = False
     traffic_hooks: tuple[ReleaseHookEvidence, ...] = ()
     health_checks: tuple[ReleaseHealthEvidence, ...] = ()
@@ -467,6 +470,9 @@ class ReleaseManifest(DurableModel):
     updated_at: datetime
     completed_at: datetime | None = None
     failure: FailureRecord | None = None
+    recovery_operation_id: str | None = Field(default=None, pattern=r"^op_[0-9a-f]{32}$")
+    recovered_at: datetime | None = None
+    recovery_failure: FailureRecord | None = None
 
     @field_validator("operation_log_path")
     @classmethod
@@ -475,7 +481,7 @@ class ReleaseManifest(DurableModel):
             raise ValueError("operation log path must be absolute")
         return value
 
-    @field_validator("started_at", "updated_at", "completed_at")
+    @field_validator("started_at", "updated_at", "completed_at", "recovered_at")
     @classmethod
     def normalize_release_timestamp(cls, value: datetime | None) -> datetime | None:
         if value is None:
@@ -484,7 +490,7 @@ class ReleaseManifest(DurableModel):
             raise ValueError("timestamp must be timezone-aware")
         return value.astimezone(UTC)
 
-    @field_serializer("started_at", "updated_at", "completed_at")
+    @field_serializer("started_at", "updated_at", "completed_at", "recovered_at")
     def serialize_release_timestamp(self, value: datetime | None) -> str | None:
         return None if value is None else serialize_utc_timestamp(value)
 
@@ -515,6 +521,17 @@ class ReleaseManifest(DurableModel):
         }
         if failed != (self.failure is not None):
             raise ValueError("failure details must be present exactly for non-active terminals")
+
+        recovery_fields = (
+            self.recovery_operation_id,
+            self.recovered_at,
+            self.recovery_failure,
+        )
+        if any(value is not None for value in recovery_fields):
+            if not all(value is not None for value in recovery_fields):
+                raise ValueError("recovery resolution fields must be recorded together")
+            if self.status not in {DeploymentState.ACTIVE, DeploymentState.ROLLED_BACK}:
+                raise ValueError("only active or rolled-back releases can record resolution")
 
         if self.status in {
             DeploymentState.MANUAL_RESTORE_STARTED,
@@ -566,6 +583,17 @@ class ReleaseManifest(DurableModel):
             raise ValueError("traffic activation fact contradicts the release state")
         if self.traffic_activated and not self.production_changed:
             raise ValueError("activated traffic requires a changed production release")
+        if self.production_migration_started and self.final_backup_id is None:
+            raise ValueError("production migration intent requires a verified final backup")
+        if self.traffic_activation_attempted and (
+            not self.production_migration_started
+            or not self.production_changed
+            or self.new_application is None
+            or not self.production_health_passed
+        ):
+            raise ValueError("traffic activation intent requires a checked production application")
+        if self.traffic_activated and not self.traffic_activation_attempted:
+            raise ValueError("activated traffic requires a durable activation attempt")
         if self.status is DeploymentState.FAILED_SAFE and (
             self.production_changed or self.traffic_activated
         ):
@@ -580,6 +608,17 @@ class ReleaseManifest(DurableModel):
             DeploymentState.ACTIVE,
         } and (self.final_backup_id is None or not self.production_changed):
             raise ValueError("production mutation requires the verified final backup")
+        if (
+            self.status
+            in {
+                DeploymentState.PRODUCTION_MIGRATED,
+                DeploymentState.NEW_APP_HEALTHY,
+                DeploymentState.TRAFFIC_ACTIVATED,
+                DeploymentState.ACTIVE,
+            }
+            and not self.production_migration_started
+        ):
+            raise ValueError("production mutation state requires durable migration intent")
         if self.status in {
             DeploymentState.NEW_APP_HEALTHY,
             DeploymentState.TRAFFIC_ACTIVATED,

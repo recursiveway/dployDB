@@ -3,7 +3,7 @@
 import json
 from importlib.metadata import version
 from pathlib import Path
-from typing import Annotated, NoReturn
+from typing import Annotated, NoReturn, cast
 
 import typer
 from rich.console import Console
@@ -23,20 +23,40 @@ from dploydb.errors import (
     ErrorKind,
     ExitCode,
     InternalError,
+    RecoveryRequiredError,
     redact_error,
+)
+from dploydb.manual_restore import (
+    DATA_LOSS_WARNING,
+    ManualRestoreResult,
+    RestoreSelection,
+    preview_configured_restore,
+    restore_configured_release,
 )
 from dploydb.models import (
     BackupArtifact,
     DeploymentState,
     DiagnosticOutcome,
     FailurePayload,
+    ReleaseManifest,
+    ReleasePointers,
 )
-from dploydb.redaction import SecretRegistry
+from dploydb.recovery import (
+    RecoveryDisposition,
+    RecoveryPlan,
+    RecoveryResult,
+    preview_configured_recovery,
+    recover_configured_deployment,
+)
+from dploydb.redaction import JsonValue, SecretRegistry
+from dploydb.releases import ReleaseHistorySnapshot, ReleaseStore
 
 app = typer.Typer(
     help="Deployment safety for SQLite applications.",
     no_args_is_help=True,
 )
+release_app = typer.Typer(help="Inspect one durable deployment release.", no_args_is_help=True)
+app.add_typer(release_app, name="release")
 console = Console(color_system=None, highlight=False, markup=False)
 
 
@@ -269,6 +289,313 @@ def _render_deployment_result(
     )
 
 
+def _release_role(release_id: str, pointers: ReleasePointers | None) -> str:
+    if pointers is None:
+        return "history"
+    if release_id == pointers.active_release_id:
+        return "active"
+    if release_id == pointers.previous_release_id:
+        return "previous"
+    return "history"
+
+
+def _release_summary(
+    manifest: ReleaseManifest,
+    *,
+    pointers: ReleasePointers | None,
+) -> dict[str, object]:
+    timestamps = manifest.model_dump(mode="json")
+    return {
+        "release_id": manifest.release_id,
+        "operation_id": manifest.operation_id,
+        "requested_version": manifest.requested_version,
+        "status": manifest.status.value,
+        "role": _release_role(manifest.release_id, pointers),
+        "protected": manifest.release_id
+        in {
+            None if pointers is None else pointers.active_release_id,
+            None if pointers is None else pointers.previous_release_id,
+        },
+        "production_changed": manifest.production_changed,
+        "traffic_activated": manifest.traffic_activated,
+        "final_backup_id": manifest.final_backup_id,
+        "started_at": timestamps["started_at"],
+        "completed_at": timestamps["completed_at"],
+        "failure_code": None if manifest.failure is None else manifest.failure.error_code,
+        "log_path": str(manifest.operation_log_path),
+    }
+
+
+def _release_history_data(
+    history: ReleaseHistorySnapshot,
+    *,
+    project: str,
+    secrets: SecretRegistry,
+) -> dict[str, object]:
+    pointers = history.pointers
+    releases = [_release_summary(manifest, pointers=pointers) for manifest in history.releases]
+    raw: JsonValue = {
+        "ok": True,
+        "command": "releases",
+        "project": project,
+        "active_release_id": None if pointers is None else pointers.active_release_id,
+        "previous_release_id": None if pointers is None else pointers.previous_release_id,
+        "count": len(releases),
+        "releases": cast(list[JsonValue], releases),
+    }
+    redacted = secrets.redact(raw)
+    if not isinstance(redacted, dict):
+        raise TypeError("release history must serialize as an object")
+    return cast(dict[str, object], redacted)
+
+
+def _render_release_history(
+    history: ReleaseHistorySnapshot,
+    *,
+    project: str,
+    json_output: bool,
+    secrets: SecretRegistry,
+) -> str:
+    data = _release_history_data(history, project=project, secrets=secrets)
+    if json_output:
+        return json.dumps(data, sort_keys=True, separators=(",", ":"))
+    lines = [
+        "DployDB releases",
+        f"Project: {data['project']}",
+        f"Active release: {data['active_release_id'] or 'none'}",
+        f"Previous release: {data['previous_release_id'] or 'none'}",
+        f"Release count: {data['count']}",
+    ]
+    summaries = cast(list[dict[str, object]], data["releases"])
+    if not summaries:
+        lines.append("No deployment releases have been recorded.")
+    for item in summaries:
+        lines.append(
+            "- "
+            f"{item['release_id']} version={item['requested_version']} "
+            f"status={item['status']} role={item['role']} started={item['started_at']}"
+        )
+    lines.append("Next safe action: inspect a release with dploydb release show <release-id>.")
+    return "\n".join(lines)
+
+
+def _release_detail_data(
+    manifest: ReleaseManifest,
+    *,
+    pointers: ReleasePointers | None,
+    secrets: SecretRegistry,
+) -> dict[str, object]:
+    raw_manifest = cast(JsonValue, manifest.model_dump(mode="json"))
+    raw: JsonValue = {
+        "ok": True,
+        "command": "release show",
+        "role": _release_role(manifest.release_id, pointers),
+        "protected": manifest.release_id
+        in {
+            None if pointers is None else pointers.active_release_id,
+            None if pointers is None else pointers.previous_release_id,
+        },
+        "release": raw_manifest,
+    }
+    redacted = secrets.redact(raw)
+    if not isinstance(redacted, dict):
+        raise TypeError("release detail must serialize as an object")
+    return cast(dict[str, object], redacted)
+
+
+def _render_release_detail(
+    manifest: ReleaseManifest,
+    *,
+    pointers: ReleasePointers | None,
+    json_output: bool,
+    secrets: SecretRegistry,
+) -> str:
+    data = _release_detail_data(manifest, pointers=pointers, secrets=secrets)
+    if json_output:
+        return json.dumps(data, sort_keys=True, separators=(",", ":"))
+    release = cast(dict[str, object], data["release"])
+    lines = [
+        "DployDB release",
+        f"Release ID: {release['release_id']}",
+        f"Version: {release['requested_version']}",
+        f"Status: {release['status']}",
+        f"Role: {data['role']}",
+        f"Protected: {_yes_no_unknown(cast(bool, data['protected']))}",
+        f"Previous release: {release['previous_release_id'] or 'none'}",
+        f"Production changed: {_yes_no_unknown(cast(bool, release['production_changed']))}",
+        f"Traffic activated: {_yes_no_unknown(cast(bool, release['traffic_activated']))}",
+        f"Rehearsal backup: {release['rehearsal_backup_id'] or 'none'}",
+        f"Final backup: {release['final_backup_id'] or 'none'}",
+        f"Started: {release['started_at']}",
+        f"Completed: {release['completed_at'] or 'not completed'}",
+        f"Relevant log: {release['operation_log_path']}",
+    ]
+    failure = release["failure"]
+    if isinstance(failure, dict):
+        lines.extend(
+            (
+                f"Failure: {failure['what_failed']}",
+                f"Next safe action: {failure['next_safe_action']}",
+            )
+        )
+    else:
+        lines.append("Next safe action: preserve this release and its referenced backups.")
+    return "\n".join(lines)
+
+
+def _restore_preview_data(
+    selection: RestoreSelection,
+    *,
+    secrets: SecretRegistry,
+) -> dict[str, object]:
+    raw = cast(JsonValue, selection.as_dict())
+    redacted = secrets.redact(raw)
+    if not isinstance(redacted, dict):
+        raise TypeError("restore preview must serialize as an object")
+    return {
+        "ok": True,
+        "command": "restore",
+        "outcome": "preview",
+        "executed": False,
+        "confirmation_required": True,
+        **cast(dict[str, object], redacted),
+    }
+
+
+def _render_restore_preview(
+    selection: RestoreSelection,
+    *,
+    json_output: bool,
+    secrets: SecretRegistry,
+) -> str:
+    data = _restore_preview_data(selection, secrets=secrets)
+    if json_output:
+        return json.dumps(data, sort_keys=True, separators=(",", ":"))
+    return "\n".join(
+        (
+            "DployDB manual restore preview",
+            DATA_LOSS_WARNING,
+            f"Current release: {data['active_release_id']} ({data['active_version']})",
+            f"Selected release: {data['selected_release_id']} ({data['selected_version']})",
+            f"Selected backup: {data['selected_backup_id']}",
+            f"Selected backup SHA-256: {data['selected_backup_sha256']}",
+            f"Production database: {data['database_path']}",
+            f"Current container: {data['current_container_name']}",
+            f"Selected container: {data['selected_container_name']}",
+            "A verified backup of the current database will be created before replacement.",
+        )
+    )
+
+
+def _render_manual_restore_result(
+    result: ManualRestoreResult,
+    *,
+    json_output: bool,
+    secrets: SecretRegistry,
+) -> str:
+    raw = cast(JsonValue, result.as_dict())
+    redacted = secrets.redact(raw)
+    if not isinstance(redacted, dict):
+        raise TypeError("manual restore result must serialize as an object")
+    data = cast(dict[str, object], redacted)
+    if json_output:
+        return json.dumps(data, sort_keys=True, separators=(",", ":"))
+    return "\n".join(
+        (
+            "DployDB manual restore completed.",
+            f"Selected release: {data['selected_release_id']} ({data['selected_version']})",
+            f"Replaced release: {data['replaced_release_id']}",
+            f"Pre-restore backup: {data['pre_restore_backup_id']}",
+            f"Restored backup: {data['restored_backup_id']}",
+            f"Database SHA-256: {data['database_sha256']}",
+            "Production changed: yes",
+            "Previous application running: yes",
+            "Recovery required: no",
+            f"Relevant log: {data['log_path']}",
+            "Next safe action: monitor the restored release and preserve the pre-restore backup.",
+        )
+    )
+
+
+def _recovery_plan_data(
+    plan: RecoveryPlan,
+    *,
+    secrets: SecretRegistry,
+) -> dict[str, object]:
+    raw = cast(JsonValue, plan.as_dict())
+    redacted = secrets.redact(raw)
+    if not isinstance(redacted, dict):
+        raise TypeError("recovery plan must serialize as an object")
+    return {
+        "ok": plan.disposition is not RecoveryDisposition.MANUAL_REQUIRED,
+        "command": "recover",
+        "outcome": "preview",
+        "executed": False,
+        "confirmation_required": plan.executable,
+        **cast(dict[str, object], redacted),
+    }
+
+
+def _render_recovery_plan(
+    plan: RecoveryPlan,
+    *,
+    json_output: bool,
+    secrets: SecretRegistry,
+) -> str:
+    data = _recovery_plan_data(plan, secrets=secrets)
+    if json_output:
+        return json.dumps(data, sort_keys=True, separators=(",", ":"))
+    actions = cast(list[str], data["actions"])
+    return "\n".join(
+        (
+            "DployDB recovery diagnosis",
+            f"Disposition: {data['disposition']}",
+            f"Release ID: {data['release_id']}",
+            f"Source operation: {data['operation_id']}",
+            f"Durable stage: {data['durable_stage']}",
+            "Production may have changed: "
+            f"{_yes_no_unknown(cast(bool, data['production_may_have_changed']))}",
+            "Traffic may have switched: "
+            f"{_yes_no_unknown(cast(bool, data['traffic_may_have_switched']))}",
+            "Automatic database restore allowed: "
+            f"{_yes_no_unknown(cast(bool, data['automatic_database_restore_allowed']))}",
+            f"Ordered actions: {', '.join(actions) if actions else 'none'}",
+            f"Reason: {data['reason']}",
+            f"Next safe action: {data['next_safe_action']}",
+        )
+    )
+
+
+def _render_recovery_result(
+    result: RecoveryResult,
+    *,
+    json_output: bool,
+    secrets: SecretRegistry,
+) -> str:
+    raw = cast(JsonValue, result.as_dict())
+    redacted = secrets.redact(raw)
+    if not isinstance(redacted, dict):
+        raise TypeError("recovery result must serialize as an object")
+    data = cast(dict[str, object], redacted)
+    if json_output:
+        return json.dumps(data, sort_keys=True, separators=(",", ":"))
+    return "\n".join(
+        (
+            "DployDB recovery completed.",
+            f"Outcome: {data['outcome']}",
+            f"Release ID: {data['release_id']}",
+            f"Recovery operation: {data['recovery_operation_id']}",
+            f"Source operation: {data['source_operation_id']}",
+            f"Production changed: {_yes_no_unknown(cast(bool, data['production_changed']))}",
+            "Previous application running: "
+            f"{_yes_no_unknown(cast(bool, data['previous_application_running']))}",
+            "Recovery required: no",
+            f"Relevant log: {data['log_path']}",
+            "Next safe action: monitor the recovered release and preserve all recovery evidence.",
+        )
+    )
+
+
 def _version_callback(value: bool) -> None:
     if value:
         console.print(_version_text())
@@ -347,7 +674,7 @@ def doctor_command(
         typer.Option("--json", help="Emit stable machine-readable output."),
     ] = False,
 ) -> None:
-    """Check Milestone 1 host safety without changing production."""
+    """Check configured host safety without changing production."""
     try:
         loaded = load_configuration(config_path)
         report = run_doctor(loaded, config_path=config_path, deep=deep)
@@ -416,6 +743,238 @@ def backup_command(
         _render_backup_result(
             artifact,
             command="backup",
+            json_output=json_output,
+            secrets=loaded.secrets,
+        )
+    )
+
+
+@app.command("releases")
+def releases_command(
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", "-c", help="Configuration file whose releases are listed."),
+    ] = DEFAULT_CONFIG_PATH,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit stable machine-readable output."),
+    ] = False,
+) -> None:
+    """List every validated local deployment release without modifying state."""
+    loaded = None
+    try:
+        loaded = load_configuration(config_path)
+        history = ReleaseStore(
+            loaded.config.state_directory,
+            secrets=loaded.secrets,
+        ).read_history()
+    except DployDBError as error:
+        if loaded is not None:
+            error = redact_error(error, secrets=loaded.secrets)
+        abort_with_error(error, json_output=json_output)
+    except Exception:
+        abort_with_error(_internal_error(), json_output=json_output)
+    typer.echo(
+        _render_release_history(
+            history,
+            project=loaded.config.project,
+            json_output=json_output,
+            secrets=loaded.secrets,
+        )
+    )
+
+
+@release_app.command("show")
+def release_show_command(
+    release_id: Annotated[str, typer.Argument(help="Exact release ID to inspect.")],
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", "-c", help="Configuration file whose release is shown."),
+    ] = DEFAULT_CONFIG_PATH,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit stable machine-readable output."),
+    ] = False,
+) -> None:
+    """Show one complete validated release manifest without modifying state."""
+    loaded = None
+    try:
+        loaded = load_configuration(config_path)
+        manifest, pointers = ReleaseStore(
+            loaded.config.state_directory,
+            secrets=loaded.secrets,
+        ).lookup_history_release(release_id)
+    except DployDBError as error:
+        if loaded is not None:
+            error = redact_error(error, secrets=loaded.secrets)
+        abort_with_error(error, json_output=json_output)
+    except Exception:
+        abort_with_error(_internal_error(), json_output=json_output)
+    typer.echo(
+        _render_release_detail(
+            manifest,
+            pointers=pointers,
+            json_output=json_output,
+            secrets=loaded.secrets,
+        )
+    )
+
+
+@app.command("restore")
+def restore_command(
+    release_id: Annotated[
+        str,
+        typer.Argument(help="Protected previous release ID to restore."),
+    ],
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", "-c", help="Configuration file for manual restore."),
+    ] = DEFAULT_CONFIG_PATH,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Acknowledge the data-loss warning and execute restore."),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit stable machine-readable output."),
+    ] = False,
+) -> None:
+    """Preview or confirm a backup-first restore of the protected previous release."""
+    loaded = None
+    try:
+        loaded = load_configuration(config_path)
+        preview = preview_configured_restore(loaded, release_id)
+    except DployDBError as error:
+        if loaded is not None:
+            error = redact_error(error, secrets=loaded.secrets)
+        abort_with_error(error, json_output=json_output)
+    except Exception:
+        abort_with_error(_internal_error(), json_output=json_output)
+
+    if not yes:
+        typer.echo(
+            _render_restore_preview(
+                preview,
+                json_output=json_output,
+                secrets=loaded.secrets,
+            )
+        )
+        if json_output:
+            return
+        confirmed = typer.confirm(
+            "Proceed with this destructive restore after creating the current-state backup?",
+            default=False,
+        )
+        if not confirmed:
+            typer.echo("Manual restore cancelled; production was not changed.")
+            return
+
+    try:
+        result = restore_configured_release(
+            loaded,
+            release_id,
+            config_path=config_path,
+        )
+    except DployDBError as error:
+        abort_with_error(
+            redact_error(error, secrets=loaded.secrets),
+            json_output=json_output,
+        )
+    except Exception:
+        abort_with_error(_internal_error(), json_output=json_output)
+    typer.echo(
+        _render_manual_restore_result(
+            result,
+            json_output=json_output,
+            secrets=loaded.secrets,
+        )
+    )
+
+
+@app.command("recover")
+def recover_command(
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", "-c", help="Configuration file for recovery."),
+    ] = DEFAULT_CONFIG_PATH,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Confirm execution of the diagnosed recovery plan."),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit stable machine-readable output."),
+    ] = False,
+) -> None:
+    """Diagnose or execute recovery for an interrupted deployment."""
+    loaded = None
+    try:
+        loaded = load_configuration(config_path)
+        plan = preview_configured_recovery(loaded, config_path=config_path)
+    except DployDBError as error:
+        if loaded is not None:
+            error = redact_error(error, secrets=loaded.secrets)
+        abort_with_error(error, json_output=json_output)
+    except Exception:
+        abort_with_error(_internal_error(), json_output=json_output)
+
+    if plan.disposition is RecoveryDisposition.MANUAL_REQUIRED:
+        abort_with_error(
+            RecoveryRequiredError(
+                plan.reason,
+                production_changed=plan.production_may_have_changed,
+                previous_application_running=None,
+                log_path=(
+                    loaded.config.state_directory
+                    / "operations"
+                    / plan.operation_id
+                    / "events.jsonl"
+                ),
+                next_safe_action=plan.next_safe_action,
+            ),
+            json_output=json_output,
+        )
+    if plan.disposition is RecoveryDisposition.NO_ACTION:
+        typer.echo(
+            _render_recovery_plan(
+                plan,
+                json_output=json_output,
+                secrets=loaded.secrets,
+            )
+        )
+        return
+    if not yes:
+        typer.echo(
+            _render_recovery_plan(
+                plan,
+                json_output=json_output,
+                secrets=loaded.secrets,
+            )
+        )
+        if json_output:
+            return
+        confirmed = typer.confirm(
+            "Execute exactly this recovery plan after revalidating it under the lock?",
+            default=False,
+        )
+        if not confirmed:
+            typer.echo("Recovery execution cancelled; diagnosis was read-only.")
+            return
+    try:
+        result = recover_configured_deployment(
+            loaded,
+            config_path=config_path,
+        )
+    except DployDBError as error:
+        abort_with_error(
+            redact_error(error, secrets=loaded.secrets),
+            json_output=json_output,
+        )
+    except Exception:
+        abort_with_error(_internal_error(), json_output=json_output)
+    typer.echo(
+        _render_recovery_result(
+            result,
             json_output=json_output,
             secrets=loaded.secrets,
         )

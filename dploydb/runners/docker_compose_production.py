@@ -25,6 +25,7 @@ from dploydb.runners.base import (
     ProductionInspection,
     ProductionInspectionError,
     ProductionLogs,
+    ProductionNetworkRefresh,
     ProductionRestart,
     ProductionRestartError,
     ProductionStart,
@@ -191,6 +192,28 @@ class DockerComposeProductionRunner:
                 result,
                 expected_running=expected_running,
             )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProductionInspectionError(
+                "production application inspection was unsafe: "
+                + self.secrets.redact_text(str(exc)),
+                command=result,
+            ) from None
+
+    def inspect_live(
+        self,
+        handle: ProductionApplicationHandle,
+        *,
+        cancellation_event: threading.Event | None = None,
+    ) -> ProductionInspection:
+        """Validate exact identity and topology while accepting either running state."""
+        self._validate_handle(handle)
+        result, raw = self._inspect_raw(
+            handle.container_id,
+            environment=self._environment_for_handle(handle),
+            cancellation_event=cancellation_event,
+        )
+        try:
+            return self._validated_inspection(handle, raw, result, expected_running=None)
         except (KeyError, TypeError, ValueError) as exc:
             raise ProductionInspectionError(
                 "production application inspection was unsafe: "
@@ -384,6 +407,31 @@ class DockerComposeProductionRunner:
     ) -> ProductionRestart:
         """Restart the exact preserved previous container and prove it is running."""
         self._validate_handle(handle)
+        network_refreshes: tuple[ProductionNetworkRefresh, ...] = ()
+        if handle.source == "release":
+            try:
+                inspect_result, raw = self._inspect_raw(
+                    handle.container_id,
+                    environment=self._environment_for_handle(handle),
+                    cancellation_event=cancellation_event,
+                )
+                self._validated_inspection(
+                    handle,
+                    raw,
+                    inspect_result,
+                    expected_running=False,
+                )
+                network_refreshes = self._refresh_stopped_network_endpoints(
+                    handle,
+                    raw,
+                    cancellation_event=cancellation_event,
+                )
+            except (ProductionInspectionError, KeyError, TypeError, ValueError) as exc:
+                raise ProductionRestartError(
+                    "previous release network refresh was unsafe: "
+                    + self.secrets.redact_text(str(exc)),
+                    command=(exc.command if isinstance(exc, ProductionInspectionError) else None),
+                ) from None
         result = self._run(
             ("docker", "container", "start", handle.container_id),
             environment=self._environment_for_handle(handle),
@@ -402,7 +450,88 @@ class DockerComposeProductionRunner:
             )
         except ProductionInspectionError as exc:
             raise ProductionRestartError(str(exc), command=exc.command) from None
-        return ProductionRestart(handle=handle, command=result, inspection=inspection)
+        return ProductionRestart(
+            handle=handle,
+            command=result,
+            inspection=inspection,
+            network_refreshes=network_refreshes,
+        )
+
+    def _refresh_stopped_network_endpoints(
+        self,
+        handle: ProductionApplicationHandle,
+        raw: dict[str, Any],
+        *,
+        cancellation_event: threading.Event | None,
+    ) -> tuple[ProductionNetworkRefresh, ...]:
+        """Refresh exact Compose endpoints before reusing a release's published port."""
+        network_settings = _required_mapping(raw, "NetworkSettings")
+        networks = _required_mapping(network_settings, "Networks")
+        if not networks:
+            raise ValueError("previous release has no inspectable network attachment")
+        environment = self._environment_for_handle(handle)
+        refreshed: list[ProductionNetworkRefresh] = []
+        for network_name, raw_attachment in sorted(networks.items()):
+            if not isinstance(network_name, str) or not network_name or len(network_name) > 255:
+                raise ValueError("previous release has an invalid network identity")
+            if not isinstance(raw_attachment, dict):
+                raise ValueError(f"network {network_name} attachment must be an object")
+            attachment = raw_attachment
+            raw_aliases = attachment.get("Aliases")
+            if raw_aliases is None:
+                aliases: tuple[str, ...] = ()
+            elif isinstance(raw_aliases, list) and all(
+                isinstance(alias, str) and 0 < len(alias) <= 255 for alias in raw_aliases
+            ):
+                aliases = tuple(dict.fromkeys(raw_aliases))
+            else:
+                raise ValueError("previous release network aliases are invalid")
+            disconnected = self._run(
+                (
+                    "docker",
+                    "network",
+                    "disconnect",
+                    "--force",
+                    network_name,
+                    handle.container_id,
+                ),
+                environment=environment,
+                cancellation_event=cancellation_event,
+            )
+            if not _successful_complete(disconnected):
+                raise ProductionRestartError(
+                    _command_failure("previous release network disconnect", disconnected),
+                    command=disconnected,
+                )
+            alias_arguments = tuple(
+                argument for alias in aliases for argument in ("--alias", alias)
+            )
+            connected = self._run(
+                (
+                    "docker",
+                    "network",
+                    "connect",
+                    *alias_arguments,
+                    network_name,
+                    handle.container_id,
+                ),
+                environment=environment,
+                cancellation_event=cancellation_event,
+            )
+            if not _successful_complete(connected):
+                raise ProductionRestartError(
+                    _command_failure("previous release network reconnect", connected),
+                    command=connected,
+                )
+            refreshed.append(
+                ProductionNetworkRefresh(
+                    network_name=network_name,
+                    aliases=aliases,
+                    disconnect=disconnected,
+                    connect=connected,
+                )
+            )
+        return tuple(refreshed)
 
     def prove_new_absent(
         self,
@@ -435,13 +564,30 @@ class DockerComposeProductionRunner:
             network_query=network_query,
         )
 
+    def prove_release_absent(
+        self,
+        *,
+        release_id: str,
+        version: str,
+    ) -> ProductionCleanupProof:
+        """Prove deterministic resources for a release are absent without mutation."""
+        if not isinstance(release_id, str) or _RELEASE_ID.fullmatch(release_id) is None:
+            raise ValueError("release_id must be an opaque DployDB release ID")
+        selected_version = validate_release_identifier(version)
+        compose_project, container_name = self._new_identity(release_id)
+        return self.prove_new_absent(
+            compose_project=compose_project,
+            container_name=container_name,
+            version=selected_version,
+        )
+
     def _validated_inspection(
         self,
         handle: ProductionApplicationHandle,
         raw: dict[str, Any],
         command: CommandResult,
         *,
-        expected_running: bool,
+        expected_running: bool | None,
     ) -> ProductionInspection:
         failures: list[str] = []
         container_id = _required_text(raw, "Id")
@@ -464,7 +610,7 @@ class DockerComposeProductionRunner:
             failures.append("container ID does not match the durable application handle")
         if container_name != handle.container_name:
             failures.append("container name does not match the durable application handle")
-        if running is not expected_running:
+        if expected_running is not None and running is not expected_running:
             failures.append(
                 "container running state does not match the required "
                 + ("running" if expected_running else "stopped")

@@ -47,8 +47,14 @@ _DEFERRED_CHECKS: Final[tuple[tuple[str, str], ...]] = (
         "migration_execution",
         "Doctor never executes migrations; the lock-tracked rehearsal stage owns this check.",
     ),
-    ("application_health", "Application health checks begin in Milestone 4."),
-    ("traffic_execution", "Traffic-hook execution begins in Milestone 5."),
+    (
+        "application_health",
+        "Doctor does not contact production health; deploy and recovery own this check.",
+    ),
+    (
+        "traffic_execution",
+        "Doctor never executes traffic hooks; deploy, restore, and recovery own them.",
+    ),
 )
 
 

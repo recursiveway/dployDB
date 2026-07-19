@@ -61,13 +61,17 @@ The product must be useful after the hackathon. Do not build fake progress scree
   (`COMPLETE` on 2026-07-19).
 - **Completed milestone:** Milestone 5 — controlled cutover and automatic
   pre-traffic application/database rollback (`COMPLETE` on 2026-07-19).
-- **Next milestone:** Milestone 6 — release history, public manual restore, and
-  interrupted-operation recovery.
+- **Completed milestone:** Milestone 6 — release history, public manual restore,
+  and interrupted-operation recovery (`COMPLETE` on 2026-07-19).
+- **Completed Milestone 6 slices:** 6A release history; 6B durable crash markers
+  and read-only recovery diagnosis; 6C restore selection and preview; 6D
+  controlled public manual restore; 6E idempotent recovery execution; and 6F
+  real crash/restore integration gate, documentation, and packaging.
 - **Milestone 4 slices:** 4A isolated Docker Compose runner, 4B bounded
   HTTP readiness and optional smoke checks, and 4C durable candidate-validation
   orchestration plus the real old-application-continuity gate.
-- **Not yet implemented:** Public manual restore, crash recovery, remote
-  storage, and retention from Milestone 6 onward.
+- **Next allowed milestone:** Milestone 7 — S3-compatible verified backup and
+  retention. Remote storage and retention are not yet implemented.
 - **Dependency workflow:** Use uv for project dependencies and development commands. Support and verify `pipx install .` as the isolated end-user installation path.
 - **Repository outcome:** Every existing `.gitignore` rule remains, including `IMPLEMENTATION_PLAN.md`; `demo/.state/` was added for generated demo databases.
 
@@ -1613,9 +1617,270 @@ Slice 5F and final Milestone 5 acceptance evidence observed on 2026-07-19:
   DployDB network. The end-to-end gate also performed exact project-token
   cleanup and asserted no matching container remained after every scenario.
 
-Milestone 5 is complete. Milestone 6 is the next allowed work; public release
-history/details, manual restore with backup-first warning, and crash recovery
-remain intentionally unclaimed.
+Milestones 0 through 6 are complete. Milestone 7 is the next allowed work;
+off-server backup and retention remain intentionally unclaimed.
+
+#### Milestone 6 implementation scope
+
+Planned on 2026-07-19:
+
+- **Owned modules:** release enumeration and reporting in `dploydb/releases.py`;
+  durable crash intent in `dploydb/deploy.py` and the shared state contracts;
+  read-only diagnosis and idempotent execution in a narrow
+  `dploydb/recovery.py`; release-aware restore planning and execution in
+  `dploydb/restore.py` plus a separate coordinator if needed; public command
+  wiring in `dploydb/cli.py`; and focused unit, fault-injection, and real-Docker
+  integration tests.
+- **Restore boundary:** the public command accepts a release ID, not a raw
+  backup ID. During the hackathon it restores only the immediately previous
+  protected release. The preview must prove the selected application identity,
+  the active release's final backup that represents the previous database, and
+  every required path before confirmation. Older history remains readable but
+  is not claimed restorable without protected evidence.
+- **Crash boundary:** persist intent before starting production migration and
+  before attempting new-traffic activation. Recovery treats a crash inside
+  either side-effect window conservatively; uncertain traffic activation can
+  never trigger automatic database rollback.
+- **Mutation boundary:** release history, restore preview, and recovery
+  diagnosis are read-only. `restore` and `recover` acquire the deployment lock,
+  require explicit confirmation, store every transition, re-inspect live
+  application state, and either prove a healthy terminal state or stop with
+  exact manual instructions.
+- **Gate boundary:** real crash tests cover interruption after maintenance,
+  after the current application stops, and after production migration. A real
+  manual restore proves the current state is backed up first and restores the
+  protected previous application and database end to end.
+
+Progress tracker:
+
+- [x] 6A — Release history and read-only CLI contracts (`COMPLETE` on
+  2026-07-19).
+- [x] 6B — Durable crash markers and recovery diagnosis matrix (`COMPLETE` on
+  2026-07-19).
+- [x] 6C — Restore selection and non-mutating preview (`COMPLETE` on
+  2026-07-19).
+- [x] 6D — Controlled public manual restore with backup-first behavior
+  (`COMPLETE` on 2026-07-19).
+- [x] 6E — Idempotent `recover` execution and safe refusal (`COMPLETE` on
+  2026-07-19).
+- [x] 6F — Real crash/restore gate, full validation, docs, and packaging
+  (`COMPLETE` on 2026-07-19).
+
+Every slice passed its focused gate before the next began. The complete 6F
+real-process, real-Docker, packaging, and regression gate is recorded below.
+
+##### 6A — Release history and read-only CLI contracts
+
+Status on 2026-07-19: `COMPLETE`. `ReleaseStore.read_history` validates the
+private state/release directories, exact release directory contents, every
+manifest, and active/previous pointers without creating state. Unknown entries,
+incomplete releases, symlinks, malformed records, and pointer contradictions
+become explicit recovery-required failures. `dploydb releases` and `dploydb
+release show <release-id>` expose stable redacted human and JSON views; invalid
+or absent user-selected IDs fail safely without a traceback.
+
+Acceptance evidence observed on 2026-07-19:
+
+- `.venv/bin/python -m pytest -q tests/unit/test_releases.py
+  tests/unit/test_release_cli.py tests/test_cli.py` — passed (`32 passed`).
+- `.venv/bin/ruff check` passed for the changed implementation/tests after
+  formatting, and `.venv/bin/mypy dploydb` passed with no issues in `30` source
+  files.
+
+Slice 6A is complete. Slice 6B is the next allowed work; no restore or recovery
+mutation is public yet.
+
+##### 6B — Durable crash markers and recovery diagnosis matrix
+
+Status on 2026-07-19: `COMPLETE`. New releases declare recovery protocol 2.
+Before production migration or new-traffic activation can run, the release and
+operation stores now durably record a monotonic intent marker. An interruption
+inside migration therefore conservatively permits only verified pre-traffic
+restore; an interruption inside traffic activation forbids database rollback
+unless durable command evidence proves the hook never started.
+
+`dploydb/recovery.py` contains a pure decision matrix that reconciles the
+operation, full event trail, release manifest, exact previous/new application
+state, final-backup verification, and current/final database checksums. Plans
+can recover the previous release, complete an already activated checked release,
+report no action, or require manual action. The Docker production boundary now
+supports read-only exact live inspection and deterministic proof that an
+operation-derived release resource is absent.
+
+Acceptance evidence observed on 2026-07-19:
+
+- `.venv/bin/python -m pytest -q tests/unit/test_recovery.py
+  tests/unit/test_releases.py tests/unit/test_deploy.py
+  tests/unit/test_docker_compose_production_runner.py` — passed (`69 passed`).
+- The matrix covers interruption after maintenance, after current-app stop,
+  after migration intent, during rollback, before traffic, an unresolved
+  traffic attempt, durable activation success, and proven activation
+  start-failure. It proves idempotent checksum-based restore skipping and legacy
+  state refusal.
+- `.venv/bin/ruff check dploydb ...` and `.venv/bin/mypy dploydb` passed with no
+  issues in `31` source files.
+
+Slice 6B is complete. Slice 6C is the next allowed work. Diagnosis remains
+read-only; no public restore or recovery mutation is exposed yet.
+
+##### 6C — Restore selection and non-mutating preview
+
+Status on 2026-07-19: `COMPLETE`. The selector accepts a release ID and permits
+only the immediately previous protected release. It validates active/previous
+pointers and lineage, both exact application handles, and the active release's
+operation-bound `FINAL` backup. This mapping is deliberate: the active
+release's final backup represents the previous release's database at cutover;
+the selected release's own final backup represents an even older state.
+
+`dploydb restore <release-id>` without confirmation is read-only and renders a
+specific data-loss warning, exact current/selected releases and containers,
+the selected checksum, and the mandatory current-state backup promise. JSON
+preview never prompts or mutates.
+
+##### 6D — Controlled public manual restore with backup-first behavior
+
+Status on 2026-07-19: `COMPLETE`. `dploydb restore <release-id> [--yes]` now
+re-resolves the preview under the deployment lock, inspects exact current and
+selected containers, enables maintenance, stops the current writer, creates a
+verified `PRE_RESTORE` backup, restores and verifies the selected database,
+restarts and checks the selected application, activates its target, disables
+maintenance, and atomically swaps active/previous pointers. Human execution
+requires confirmation unless `--yes` is supplied; JSON without `--yes` remains
+a preview.
+
+Failures before selected traffic activation restore the pre-restore database
+and exact current application and finish `failed_safe` only after health proof.
+Unproven application lifecycle, hook cleanup, or any failure after normal
+traffic may be enabled becomes `recovery_required` and never automatically
+restores an older/newer database across the traffic boundary.
+
+Acceptance evidence observed on 2026-07-19:
+
+- `.venv/bin/python -m pytest -q tests/unit/test_restore.py
+  tests/unit/test_manual_restore.py tests/unit/test_restore_cli.py
+  tests/unit/test_releases.py tests/unit/test_deploy.py
+  tests/unit/test_recovery.py` — passed (`64 passed`).
+- Focused success uses real SQLite backup/restore bytes, proves the pre-restore
+  backup contains the replaced current schema, restores the selected schema,
+  swaps release pointers, and records `manual_restore_completed`. Fault tests
+  prove safe pre-traffic rollback and post-traffic no-database-rollback.
+- `.venv/bin/ruff check dploydb ...` and `.venv/bin/mypy dploydb` passed with no
+  issues in `32` source files.
+
+Slices 6C and 6D are complete. Slice 6E is next; public interrupted-deployment
+recovery execution remains unclaimed.
+
+##### 6E — Idempotent `recover` execution and safe refusal
+
+Status on 2026-07-19: `COMPLETE`. `dploydb recover [--yes]` first produces a
+read-only plan from durable and live evidence. JSON without `--yes` never
+prompts or mutates; human execution requires confirmation. Manual-required
+plans exit `60` with the standard safety payload and never execute an action.
+
+Confirmed recovery acquires the deployment lock, regenerates the plan, marks
+the interrupted source operation and release recovery-required, and creates a
+separate recovery operation. It executes only the plan's ordered actions and
+stores intent before each. Previous-release recovery can remove a known new
+container, restore a reverified final backup, restart the exact previous
+container, restore hooks, and verify SQLite/HTTP health. A durably successful
+new-traffic hook instead keeps the new database, disables maintenance, verifies
+the exact new application, and completes it active.
+
+Recovery resolution preserves the original failure, recovered timestamp, and
+recovery operation ID. It never rewrites a failed release to look as if no
+failure occurred. Repeated recovery re-inspects live containers and checksums;
+tests interrupt recovery after database restoration and prove the retry skips
+that replacement, completes the remaining actions, and records a healthy
+terminal result. Unrelated unfinished operations and incomplete cross-store
+resolution refuse automatic action.
+
+Acceptance evidence observed on 2026-07-19:
+
+- `.venv/bin/python -m pytest -q tests/unit/test_state.py
+  tests/unit/test_releases.py tests/unit/test_recovery.py
+  tests/unit/test_manual_restore.py tests/unit/test_recover_cli.py
+  tests/unit/test_restore_cli.py tests/unit/test_deploy.py tests/test_cli.py` —
+  passed (`114 passed`).
+- Success tests prove previous rollback after a production-migration crash,
+  retry after a second recovery interruption, completion of a checked new
+  release after durable activation success, no-action after resolution, stable
+  refusal, and explicit confirmation behavior.
+- `.venv/bin/ruff check dploydb ...` and `.venv/bin/mypy dploydb` passed with no
+  issues in `32` source files.
+
+Slice 6E is complete. Slice 6F evidence follows.
+
+##### 6F — Real crash/restore gate, documentation, and packaging
+
+Status on 2026-07-19: `COMPLETE`. The deployment coordinator exposes bounded
+test-only hard-crash checkpoints immediately after its durable maintenance,
+current-app-stopped, and production-migrated records. Separate Python
+processes terminate with `os._exit` at those checkpoints, leaving the normal
+exception/rollback path unable to run. Recovery then correlates the exact dead
+OS-lock owner with the interrupted operation, refuses unrelated owner tokens,
+rechecks live Docker and backup/checksum state, and restores verified v1.
+
+The real manual-restore gate performs two successful public deployments so the
+release store contains an active and protected previous release. Preview is
+read-only. Confirmed restore preserves the current state in a verified
+`PRE_RESTORE` backup, restores the previous release's final backup, restarts
+and verifies its exact application, switches traffic, and swaps pointers. The
+test proves data written after the selected snapshot is absent from restored
+production but remains present in the pre-restore backup.
+
+The real Docker gate also exposed that a preserved older release can retain a
+stale published-port route when a newer stopped container exists. The
+production runner now validates that the selected release is stopped, refreshes
+only its exact Compose network endpoints with bounded disconnect/reconnect
+commands and preserved aliases, stores that evidence, and starts it only after
+every reconnect succeeds. An unproven reconnect refuses startup. This makes
+the public restore self-contained rather than relying on manual Docker state
+changes.
+
+Acceptance evidence observed on 2026-07-19:
+
+- `.venv/bin/python -m pytest -q
+  tests/integration/test_deploy_end_to_end.py` — passed (`7 passed in 56.19s`).
+  It proves a healthy deployment, production-migration and final-health
+  rollback, three abrupt process crashes, and backup-first public manual
+  restore. Each scenario removes its exact Docker resources.
+- The three crash processes exited at the durable checkpoints after
+  maintenance enable, current-app stop, and production migration. `status`
+  returned exit `60`; read-only `recover --json` selected `recover_previous`;
+  `recover --yes --json` completed `rolled_back`; v1 HTTP health, exact schema,
+  row data, recovery operation ID, and preserved original failure were proven.
+- The public restore test passed independently (`1 passed in 8.72s`). Its JSON
+  preview changed nothing, its result recorded `manual_restore_completed`,
+  selected/replaced release IDs and swapped pointers, production contained only
+  the selected snapshot's rows, and the verified pre-restore backup retained
+  the later row.
+- Focused runner/coordinator/recovery tests passed (`65 passed in 2.59s`),
+  including exact stale-owner acknowledgement, unrelated owner refusal,
+  network endpoint refresh evidence, and refusal to start after an unproven
+  reconnect.
+- Final `.venv/bin/python -m pytest -q` passed with required loopback and Docker
+  access (`504 passed in 167.48s`), covering all Milestone 0 through 6 tests.
+  After the final help-text adjustment, the affected diagnostics/CLI tests
+  passed again (`25 passed in 1.91s`).
+- `.venv/bin/ruff check .`, `.venv/bin/ruff format --check .`, `git diff
+  --check`, `.venv/bin/mypy dploydb`, and `.venv/bin/mypy demo` passed (`81`
+  files formatted; no type issues in `32` package or `8` demo source files).
+- `uv lock --check` and `uv sync --locked --check` passed with `38` resolved
+  and `37` checked packages and no changes. `uv build` rebuilt
+  `dist/dploydb-0.1.0.tar.gz` and the wheel; the wheel contains release,
+  restore, recovery, runner, and CLI modules. `uv run python
+  scripts/verify_pipx_install.py` passed after the final source adjustments.
+- Root, `releases`, `release show`, `restore`, and `recover` help commands
+  exited `0` and expose the required IDs, `--json`, and confirmation flags.
+  Console and module version commands both printed `dploydb 0.1.0`.
+- Final read-only Docker audits found no candidate container, no
+  production-release container, and no DployDB network.
+- `README.md` now documents release history, restore preview/confirmation,
+  backup-first behavior, recovery preview/confirmation, exact safe refusal,
+  idempotent retry, and the no-automatic-database-rollback traffic boundary.
+
+Milestone 6 is complete. Milestone 7 is the next allowed work; no remote backup
+or retention behavior is claimed.
 
 ---
 

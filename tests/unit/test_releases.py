@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from dploydb.errors import OperationFailedError, StateCorruptionError
+from dploydb.errors import OperationFailedError, SafetyCheckError, StateCorruptionError
 from dploydb.models import (
     DeploymentState,
     FailureRecord,
@@ -127,6 +127,7 @@ def drive_active(
         final_backup_id=FINAL_BACKUP_ID,
         final_backup_sha256=FINAL_SHA256,
     )
+    selected.record_recovery_intent(release_id, production_migration_started=True)
     selected.transition(
         release_id,
         status=DeploymentState.PRODUCTION_MIGRATED,
@@ -145,6 +146,7 @@ def drive_active(
         new_application=new_application,
         production_health_passed=True,
     )
+    selected.record_recovery_intent(release_id, traffic_activation_attempted=True)
     selected.transition(
         release_id,
         status=DeploymentState.TRAFFIC_ACTIVATED,
@@ -195,6 +197,42 @@ def test_release_transition_graph_and_terminal_immutability(tmp_path: Path) -> N
         selected.transition(active.release_id, status=DeploymentState.RECOVERY_REQUIRED)
 
 
+def test_recovery_intents_are_durable_monotonic_and_required_by_later_states(
+    tmp_path: Path,
+) -> None:
+    selected = store(tmp_path)
+    manifest = create(selected, tmp_path, previous_application=bootstrap_handle(tmp_path))
+    selected.transition(manifest.release_id, status=DeploymentState.PREFLIGHT_PASSED)
+    selected.transition(
+        manifest.release_id,
+        status=DeploymentState.SNAPSHOT_VERIFIED,
+        rehearsal_backup_id=BACKUP_ID,
+        rehearsal_backup_sha256=SHA256,
+    )
+    selected.transition(manifest.release_id, status=DeploymentState.REHEARSAL_PASSED)
+    selected.transition(manifest.release_id, status=DeploymentState.CANDIDATE_HEALTHY)
+    selected.transition(manifest.release_id, status=DeploymentState.MAINTENANCE_ENABLED)
+    selected.transition(manifest.release_id, status=DeploymentState.CURRENT_APP_STOPPED)
+    selected.transition(
+        manifest.release_id,
+        status=DeploymentState.FINAL_SNAPSHOT_VERIFIED,
+        final_backup_id=FINAL_BACKUP_ID,
+        final_backup_sha256=FINAL_SHA256,
+    )
+
+    with pytest.raises(ValidationError, match="durable migration intent"):
+        selected.transition(
+            manifest.release_id,
+            status=DeploymentState.PRODUCTION_MIGRATED,
+            production_changed=True,
+        )
+
+    marked = selected.record_recovery_intent(manifest.release_id, production_migration_started=True)
+    assert marked.production_migration_started is True
+    again = selected.record_recovery_intent(manifest.release_id, production_migration_started=True)
+    assert again.production_migration_started is True
+
+
 def test_active_and_previous_selection_are_atomic_and_explicit(tmp_path: Path) -> None:
     selected = store(tmp_path)
     first = create(selected, tmp_path, previous_application=bootstrap_handle(tmp_path))
@@ -218,6 +256,73 @@ def test_active_and_previous_selection_are_atomic_and_explicit(tmp_path: Path) -
     assert second_pointers.previous_release_id == first_active.release_id
     assert selected.active_release() == second_active
     assert selected.previous_release() == first_active
+
+
+def test_read_history_is_complete_newest_first_and_read_only(tmp_path: Path) -> None:
+    selected = store(tmp_path)
+    missing_state = selected.state_directory
+
+    empty = selected.read_history()
+
+    assert empty.releases == ()
+    assert empty.pointers is None
+    assert not missing_state.exists()
+
+    first = create(selected, tmp_path, previous_application=bootstrap_handle(tmp_path))
+    first_active, first_handle = drive_active(selected, tmp_path, first)
+    selected.activate_release(first.release_id)
+    second = create(
+        selected,
+        tmp_path,
+        version="v3",
+        operation_id="op_" + "4" * 32,
+        previous_application=first_handle,
+    )
+    second_active, _ = drive_active(selected, tmp_path, second)
+    pointers = selected.activate_release(second.release_id)
+
+    history = selected.read_history()
+
+    assert history.releases == (second_active, first_active)
+    assert history.pointers == pointers
+    assert history.find(first_active.release_id) == first_active
+    assert history.find("release_" + "f" * 32) is None
+
+
+def test_history_rejects_unknown_entries_and_incomplete_release(tmp_path: Path) -> None:
+    selected = store(tmp_path)
+    manifest = create(selected, tmp_path)
+    unexpected = selected.releases_directory / "notes.txt"
+    unexpected.write_text("do not ignore me", encoding="utf-8")
+
+    with pytest.raises(StateCorruptionError, match="unexpected entry"):
+        selected.read_history()
+
+    unexpected.unlink()
+    incomplete = selected.releases_directory / ("release_" + "9" * 32)
+    incomplete.mkdir(mode=0o700)
+    with pytest.raises(StateCorruptionError, match="exactly one manifest"):
+        selected.read_history()
+
+    assert selected.read_manifest(manifest.release_id) == manifest
+
+
+@pytest.mark.parametrize("release_id", ["../manifest.json", "release_missing", ""])
+def test_history_lookup_rejects_invalid_release_id(
+    tmp_path: Path,
+    release_id: str,
+) -> None:
+    selected = store(tmp_path)
+
+    with pytest.raises(SafetyCheckError, match="release ID is invalid"):
+        selected.lookup_history_release(release_id)
+
+
+def test_history_lookup_reports_valid_but_missing_release(tmp_path: Path) -> None:
+    selected = store(tmp_path)
+
+    with pytest.raises(SafetyCheckError, match="release does not exist"):
+        selected.lookup_history_release("release_" + "9" * 32)
 
 
 def test_failed_safe_release_requires_failure_and_preserves_production_fact(

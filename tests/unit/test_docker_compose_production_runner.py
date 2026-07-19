@@ -18,6 +18,7 @@ from dploydb.runners.base import (
     ProductionCleanupError,
     ProductionDiscoveryError,
     ProductionInspectionError,
+    ProductionRestartError,
     ProductionStartError,
 )
 from dploydb.runners.docker_compose_production import (
@@ -211,11 +212,16 @@ def inspection_payload(
                     }
                 ],
                 "NetworkSettings": {
+                    "Networks": {
+                        f"{project}_default": {
+                            "Aliases": [container_name, "app"],
+                        }
+                    },
                     "Ports": (
                         {"8080/tcp": [{"HostIp": host_ip, "HostPort": str(host_port)}]}
                         if running
                         else {}
-                    )
+                    ),
                 },
                 "HostConfig": {
                     "PortBindings": {"8080/tcp": [{"HostIp": host_ip, "HostPort": str(host_port)}]}
@@ -346,6 +352,20 @@ def test_stop_preserves_exact_previous_container_and_proves_stopped(tmp_path: Pa
     assert all("rm" not in call.command for call in executor.calls)
 
 
+def test_recovery_live_inspection_accepts_valid_running_or_stopped_state(
+    tmp_path: Path,
+) -> None:
+    database = (tmp_path / "production" / "app.db").resolve()
+    runner, _executor, _created = selected_runner(
+        tmp_path,
+        [result("inspect", stdout=inspection_payload(database, running=False))],
+    )
+
+    inspection = runner.inspect_live(bootstrap_handle(database))
+
+    assert inspection.running is False
+
+
 def test_start_new_uses_release_project_production_mount_and_no_test_environment(
     tmp_path: Path,
 ) -> None:
@@ -454,6 +474,20 @@ def test_remove_new_is_exact_idempotent_and_never_targets_previous(tmp_path: Pat
     assert any(project in command for command in commands)
 
 
+def test_recovery_can_prove_deterministic_release_resources_absent(tmp_path: Path) -> None:
+    runner, executor, _database = selected_runner(
+        tmp_path,
+        [result("container-proof"), result("network-proof")],
+    )
+
+    proof = runner.prove_release_absent(release_id=RELEASE_ID, version="v2")
+
+    assert proof.proven is True
+    project, name = identity()
+    assert any(name in argument for argument in executor.calls[0].command)
+    assert any(project in argument for argument in executor.calls[1].command)
+
+
 def test_failed_start_preserves_primary_evidence_and_cleanup_proof(tmp_path: Path) -> None:
     runner, _executor, _database = selected_runner(
         tmp_path,
@@ -505,6 +539,98 @@ def test_restart_previous_uses_exact_container_and_proves_running(tmp_path: Path
         "start",
         CONTAINER_ID,
     )
+
+
+def test_restart_release_refreshes_exact_stopped_network_before_port_reuse(
+    tmp_path: Path,
+) -> None:
+    database = (tmp_path / "production" / "app.db").resolve()
+    project, name = identity()
+    runner, executor, _created = selected_runner(
+        tmp_path,
+        [
+            result(
+                "inspect-stopped",
+                stdout=inspection_payload(
+                    database,
+                    container_id=NEW_CONTAINER_ID,
+                    container_name=name,
+                    project=project,
+                    running=False,
+                    release=True,
+                ),
+            ),
+            result("disconnect"),
+            result("connect"),
+            result("start", stdout=f"{name}\n"),
+            result(
+                "inspect-running",
+                stdout=inspection_payload(
+                    database,
+                    container_id=NEW_CONTAINER_ID,
+                    container_name=name,
+                    project=project,
+                    release=True,
+                ),
+            ),
+        ],
+    )
+
+    restarted = runner.restart_previous(release_handle(database))
+
+    assert restarted.inspection.running is True
+    assert len(restarted.network_refreshes) == 1
+    assert restarted.network_refreshes[0].network_name == f"{project}_default"
+    assert executor.calls[1].command == (
+        "docker",
+        "network",
+        "disconnect",
+        "--force",
+        f"{project}_default",
+        NEW_CONTAINER_ID,
+    )
+    assert executor.calls[2].command == (
+        "docker",
+        "network",
+        "connect",
+        "--alias",
+        name,
+        "--alias",
+        "app",
+        f"{project}_default",
+        NEW_CONTAINER_ID,
+    )
+    assert executor.calls[3].command == ("docker", "container", "start", NEW_CONTAINER_ID)
+
+
+def test_restart_release_refuses_to_start_after_unproven_network_reconnect(
+    tmp_path: Path,
+) -> None:
+    database = (tmp_path / "production" / "app.db").resolve()
+    project, name = identity()
+    runner, executor, _created = selected_runner(
+        tmp_path,
+        [
+            result(
+                "inspect-stopped",
+                stdout=inspection_payload(
+                    database,
+                    container_id=NEW_CONTAINER_ID,
+                    container_name=name,
+                    project=project,
+                    running=False,
+                    release=True,
+                ),
+            ),
+            result("disconnect"),
+            result("connect", outcome=CommandOutcome.NONZERO_EXIT, exit_code=7),
+        ],
+    )
+
+    with pytest.raises(ProductionRestartError, match="status 7"):
+        runner.restart_previous(release_handle(database))
+
+    assert not any(call.command[:3] == ("docker", "container", "start") for call in executor.calls)
 
 
 def test_logs_are_bounded_evidence_from_exact_container(tmp_path: Path) -> None:

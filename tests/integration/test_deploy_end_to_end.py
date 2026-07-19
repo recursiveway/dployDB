@@ -23,6 +23,7 @@ import yaml
 
 from dploydb.config import STARTER_CONFIGURATION
 from dploydb.models import new_operation_id
+from dploydb.storage.local import LocalBackupStorage
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = ROOT / "demo" / "compose.yaml"
@@ -458,6 +459,210 @@ def test_real_docker_deploy_flows_and_pre_activation_traffic_isolation(
         if monitor is not None:
             monitor.close()
         _cleanup_resources(token)
+
+
+@pytest.mark.parametrize(
+    "crash_stage",
+    [
+        "after_maintenance_enabled",
+        "after_current_app_stopped",
+        "after_production_migrated",
+    ],
+)
+def test_real_process_crash_is_diagnosed_and_recovered_to_healthy_v1(
+    tmp_path: Path,
+    crash_stage: str,
+) -> None:
+    docker = subprocess.run(
+        ["docker", "info"], capture_output=True, text=True, timeout=30, check=False
+    )
+    assert docker.returncode == 0, f"Docker is required for Milestone 6F:\n{docker.stderr}"
+    token = f"crash{str(new_operation_id())[-10:]}"
+    current_project = f"{token}-current"
+    data = (tmp_path / "data").resolve()
+    data.mkdir()
+    database = data / "app.db"
+    database.touch()
+    _migrate(database, "v1")
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO notes(body) VALUES ('crash recovery sentinel')")
+    production_port = _available_port()
+    candidate_port = _available_port()
+    while candidate_port == production_port:
+        candidate_port = _available_port()
+    traffic_state = tmp_path / "traffic.json"
+    traffic_state.write_text(
+        json.dumps({"maintenance": False, "target": "old", "events": []}) + "\n",
+        encoding="utf-8",
+    )
+    config_path = _write_configuration(
+        tmp_path,
+        project=token,
+        current_project=current_project,
+        database=database,
+        production_port=production_port,
+        candidate_port=candidate_port,
+        release="v2",
+        traffic_state=traffic_state,
+        production_migration_failure=False,
+    )
+    environment = _environment(data, production_port, "v2")
+    crash_script = """
+import os
+import sys
+from pathlib import Path
+
+from dploydb.config import load_configuration
+from dploydb.deploy import deploy_configured_release
+
+config_path = Path(sys.argv[1])
+crash_stage = sys.argv[2]
+loaded = load_configuration(config_path)
+
+def crash(stage: str) -> None:
+    if stage == crash_stage:
+        os._exit(91)
+
+deploy_configured_release(
+    loaded,
+    version="v2",
+    config_path=config_path,
+    fault_injector=crash,
+)
+raise SystemExit(92)
+"""
+    try:
+        started = _compose(
+            current_project,
+            data,
+            production_port,
+            "v1",
+            "up",
+            "--detach",
+            "--build",
+            "--force-recreate",
+            "app",
+        )
+        assert started.returncode == 0, started.stderr
+        _wait_for_release(production_port, "v1")
+
+        crashed = subprocess.run(
+            [
+                str(ROOT / ".venv" / "bin" / "python"),
+                "-c",
+                crash_script,
+                str(config_path),
+                crash_stage,
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        assert crashed.returncode == 91, crashed.stderr or crashed.stdout
+
+        status = subprocess.run(
+            [
+                str(ROOT / ".venv" / "bin" / "dploydb"),
+                "status",
+                "--config",
+                str(config_path),
+                "--json",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert status.returncode == 60, status.stderr or status.stdout
+        assert json.loads(status.stdout)["recovery_required"] is True
+
+        preview = subprocess.run(
+            [
+                str(ROOT / ".venv" / "bin" / "dploydb"),
+                "recover",
+                "--config",
+                str(config_path),
+                "--json",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert preview.returncode == 0, preview.stderr or preview.stdout
+        plan = json.loads(preview.stdout)
+        assert plan["disposition"] == "recover_previous"
+        assert plan["executed"] is False
+        assert plan["traffic_may_have_switched"] is False
+        if crash_stage == "after_production_migrated":
+            assert "restore_final_backup" in plan["actions"]
+        else:
+            assert "restore_final_backup" not in plan["actions"]
+
+        recovered = subprocess.run(
+            [
+                str(ROOT / ".venv" / "bin" / "dploydb"),
+                "recover",
+                "--config",
+                str(config_path),
+                "--yes",
+                "--json",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+        assert recovered.returncode == 0, recovered.stderr or recovered.stdout
+        recovery = json.loads(recovered.stdout)
+        assert recovery["outcome"] == "rolled_back"
+        assert recovery["recovery_required"] is False
+        assert recovery["source_operation_id"] == plan["operation_id"]
+
+        _wait_for_release(production_port, "v1")
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone() == (1,)
+            assert [row[1] for row in connection.execute("PRAGMA table_info(notes)")] == [
+                "id",
+                "body",
+            ]
+            assert connection.execute("SELECT body FROM notes ORDER BY id").fetchall() == [
+                ("crash recovery sentinel",)
+            ]
+
+        shown = subprocess.run(
+            [
+                str(ROOT / ".venv" / "bin" / "dploydb"),
+                "release",
+                "show",
+                plan["release_id"],
+                "--config",
+                str(config_path),
+                "--json",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert shown.returncode == 0, shown.stderr or shown.stdout
+        release = json.loads(shown.stdout)["release"]
+        assert release["status"] == "rolled_back"
+        assert release["recovery_failure"] is not None
+        assert release["recovery_operation_id"] == recovery["recovery_operation_id"]
+    finally:
+        _cleanup_resources(token)
         remaining = subprocess.run(
             ["docker", "container", "ls", "--all", "--quiet", "--filter", f"name={token}"],
             capture_output=True,
@@ -466,3 +671,173 @@ def test_real_docker_deploy_flows_and_pre_activation_traffic_isolation(
             check=False,
         )
         assert remaining.returncode == 0 and not remaining.stdout.strip(), remaining.stderr
+
+
+def test_public_manual_restore_is_backup_first_and_reactivates_selected_release(
+    tmp_path: Path,
+) -> None:
+    docker = subprocess.run(
+        ["docker", "info"], capture_output=True, text=True, timeout=30, check=False
+    )
+    assert docker.returncode == 0, f"Docker is required for Milestone 6F:\n{docker.stderr}"
+    token = f"restore{str(new_operation_id())[-10:]}"
+    current_project = f"{token}-current"
+    data = (tmp_path / "data").resolve()
+    data.mkdir()
+    database = data / "app.db"
+    database.touch()
+    _migrate(database, "v1")
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO notes(body) VALUES ('restore baseline')")
+    connection.close()
+    production_port = _available_port()
+    candidate_port = _available_port()
+    while candidate_port == production_port:
+        candidate_port = _available_port()
+    traffic_state = tmp_path / "traffic.json"
+    traffic_state.write_text(
+        json.dumps({"maintenance": False, "target": "old", "events": []}) + "\n",
+        encoding="utf-8",
+    )
+    config_path = _write_configuration(
+        tmp_path,
+        project=token,
+        current_project=current_project,
+        database=database,
+        production_port=production_port,
+        candidate_port=candidate_port,
+        release="v2",
+        traffic_state=traffic_state,
+        production_migration_failure=False,
+    )
+    environment = _environment(data, production_port, "v2")
+    dploydb = str(ROOT / ".venv" / "bin" / "dploydb")
+
+    def run_cli(*arguments: str, timeout: float = 300) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [dploydb, *arguments, "--config", str(config_path), "--json"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+
+    try:
+        started = _compose(
+            current_project,
+            data,
+            production_port,
+            "v1",
+            "up",
+            "--detach",
+            "--build",
+            "--force-recreate",
+            "app",
+        )
+        assert started.returncode == 0, started.stderr
+        _wait_for_release(production_port, "v1")
+
+        first_deploy = run_cli("deploy", "--version", "v2", "--non-interactive")
+        assert first_deploy.returncode == 0, first_deploy.stderr or first_deploy.stdout
+        first = json.loads(first_deploy.stdout)
+        first_release_id = first["release_id"]
+        _wait_for_release(production_port, "v2")
+        with sqlite3.connect(database) as connection:
+            connection.execute("INSERT INTO notes(body) VALUES ('before second release')")
+        connection.close()
+
+        configuration: dict[str, Any] = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        configuration["migration"]["command"] = [sys.executable, "-c", "pass"]
+        config_path.write_text(
+            yaml.safe_dump(configuration, sort_keys=False),
+            encoding="utf-8",
+        )
+        repeat_release = tmp_path / "v2-repeat"
+        repeat_release.mkdir()
+        repeat_definition = json.loads(
+            (RELEASES / "v2" / "release.json").read_text(encoding="utf-8")
+        )
+        repeat_definition["name"] = "v2-repeat"
+        (repeat_release / "release.json").write_text(
+            json.dumps(repeat_definition, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        environment["DPLOYDB_DEMO_RELEASE_DIR"] = str(repeat_release)
+        environment["DPLOYDB_VERSION"] = "v2-repeat"
+        second_deploy = run_cli("deploy", "--version", "v2-repeat", "--non-interactive")
+        assert second_deploy.returncode == 0, second_deploy.stderr or second_deploy.stdout
+        second = json.loads(second_deploy.stdout)
+        second_release_id = second["release_id"]
+        assert second_release_id != first_release_id
+        _wait_for_release(production_port, "v2-repeat")
+        with sqlite3.connect(database) as connection:
+            connection.execute("INSERT INTO notes(body) VALUES ('after second release')")
+        connection.close()
+
+        preview_result = run_cli("restore", first_release_id, timeout=60)
+        assert preview_result.returncode == 0, preview_result.stderr or preview_result.stdout
+        preview = json.loads(preview_result.stdout)
+        assert preview["executed"] is False
+        assert preview["confirmation_required"] is True
+        assert preview["selected_release_id"] == first_release_id
+        assert preview["active_release_id"] == second_release_id
+        assert preview["pre_restore_backup_required"] is True
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("SELECT body FROM notes ORDER BY id").fetchall() == [
+                ("restore baseline",),
+                ("before second release",),
+                ("after second release",),
+            ]
+        connection.close()
+
+        restored_result = run_cli("restore", first_release_id, "--yes", timeout=180)
+        if restored_result.returncode != 0:
+            selected_logs = subprocess.run(
+                ["docker", "container", "logs", preview["selected_container_id"]],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            pytest.fail(
+                (restored_result.stderr or restored_result.stdout)
+                + "\nselected application logs:\n"
+                + selected_logs.stdout
+                + selected_logs.stderr
+            )
+        restored = json.loads(restored_result.stdout)
+        assert restored["outcome"] == "manual_restore_completed"
+        assert restored["selected_release_id"] == first_release_id
+        assert restored["replaced_release_id"] == second_release_id
+        assert restored["active_release_id"] == first_release_id
+        assert restored["previous_release_id"] == second_release_id
+        assert restored["recovery_required"] is False
+        _wait_for_release(production_port, "v2")
+
+        with sqlite3.connect(database) as connection:
+            assert connection.execute("SELECT body FROM notes ORDER BY id").fetchall() == [
+                ("restore baseline",),
+                ("before second release",),
+            ]
+        connection.close()
+        pre_restore = LocalBackupStorage(tmp_path / "backups").get(
+            restored["pre_restore_backup_id"]
+        )
+        with sqlite3.connect(pre_restore.database_path) as connection:
+            assert connection.execute("SELECT body FROM notes ORDER BY id").fetchall() == [
+                ("restore baseline",),
+                ("before second release",),
+                ("after second release",),
+            ]
+        connection.close()
+
+        traffic = json.loads(traffic_state.read_text(encoding="utf-8"))
+        assert [event["action"] for event in traffic["events"]][-3:] == [
+            "maintenance-on",
+            "activate-old",
+            "maintenance-off",
+        ]
+    finally:
+        _cleanup_resources(token)

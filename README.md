@@ -4,7 +4,7 @@ DployDB is being built as a deployment-safety tool for applications that use one
 
 ## Current status
 
-Milestones 0 through 5 provide:
+Milestones 0 through 6 provide:
 
 - an installable `dploydb` CLI with help and version commands;
 - strict, duplicate-safe configuration parsing with environment interpolation;
@@ -36,6 +36,16 @@ Milestones 0 through 5 provide:
 - exact previous-container preservation and automatic application/database
   rollback for failures before new traffic activation, with durable release,
   hook, health, checksum, and event evidence;
+- read-only `dploydb releases` and `dploydb release show <release-id>` history
+  with validated active/previous pointers and preserved failure evidence;
+- `dploydb restore <release-id>`, which previews the protected immediately
+  previous release, warns about data loss, and creates a verified backup of the
+  current state before any confirmed database replacement;
+- `dploydb recover`, which reconciles durable intent, backups, checksums, exact
+  Docker resources, traffic evidence, and the OS lock before offering an
+  idempotent recovery plan;
+- real abrupt-process crash tests after maintenance, current-app stop, and
+  production migration, plus a real backup-first previous-release restore;
 - a deterministic Docker Compose demo application;
 - working v1 and v2 release fixtures;
 - a deliberately broken migration fixture;
@@ -46,9 +56,9 @@ Milestones 0 through 5 provide:
 
 The demo controller is **not** the DployDB deployment engine. Migration
 rehearsal and candidate validation are internal stages of the public deployment
-engine. Controlled production cutover and automatic pre-traffic rollback are
-implemented. Public manual restore, interrupted-operation recovery, remote
-backup storage, and retention are not implemented yet.
+engine. Controlled production cutover, automatic pre-traffic rollback,
+release-aware manual restore, and interrupted-operation recovery are
+implemented. Remote backup storage and retention are not implemented yet.
 
 ## Prerequisites
 
@@ -149,6 +159,69 @@ returns an `outcome` of `rolled_back`. Once new traffic may be active, DployDB
 does not automatically restore the old database; uncertain routing or
 post-activation failure is reported as `recovery_required` with the evidence
 log and next safe action.
+
+## Inspect and restore releases
+
+List validated local history or inspect one immutable release record:
+
+```bash
+dploydb releases --config /absolute/path/to/dploydb.yaml
+dploydb releases --config /absolute/path/to/dploydb.yaml --json
+dploydb release show release_0123456789abcdef0123456789abcdef \
+  --config /absolute/path/to/dploydb.yaml --json
+```
+
+Manual restore is intentionally limited to the protected immediately previous
+release. Previewing is read-only and prints the exact application, database
+backup, checksum, and data-loss warning:
+
+```bash
+dploydb restore release_0123456789abcdef0123456789abcdef \
+  --config /absolute/path/to/dploydb.yaml
+dploydb restore release_0123456789abcdef0123456789abcdef \
+  --config /absolute/path/to/dploydb.yaml --json
+```
+
+After reviewing the preview, confirm interactively or use `--yes` explicitly:
+
+```bash
+dploydb restore release_0123456789abcdef0123456789abcdef \
+  --config /absolute/path/to/dploydb.yaml --yes
+```
+
+DployDB revalidates the selection under the deployment lock, enables
+maintenance, stops the current writer, creates and verifies a `PRE_RESTORE`
+backup, restores the selected database, restarts and checks the selected
+application, switches traffic, and then swaps active/previous pointers. A
+pre-traffic failure restores and verifies the pre-restore database and current
+application. Once selected traffic may have been exposed, DployDB does not
+automatically replace the database again.
+
+## Recover an interrupted deployment
+
+`status` reports an abrupt or contradictory operation with exit code `60`.
+Diagnose it without mutation:
+
+```bash
+dploydb recover --config /absolute/path/to/dploydb.yaml
+dploydb recover --config /absolute/path/to/dploydb.yaml --json
+```
+
+An executable plan lists its exact ordered actions and requires confirmation.
+Run it interactively or acknowledge it explicitly:
+
+```bash
+dploydb recover --config /absolute/path/to/dploydb.yaml --yes
+```
+
+Recovery can return to the verified previous application/database when traffic
+was not activated, or finish an already checked new release when durable hook
+evidence proves activation succeeded. If traffic activation is uncertain,
+backup lineage conflicts, live identities cannot be proven, or unrelated
+operations are unfinished, it refuses automatic mutation with
+`recovery_required`, the evidence log, and the next safe action. Re-running a
+partially interrupted recovery re-inspects live state and skips database
+replacement when the checksum already matches the verified target.
 
 ## Observe the broken migration
 
@@ -298,8 +371,8 @@ uv run dploydb verify backup_0123456789abcdef0123456789abcdef \
 The configured backup directory must be owned privately with mode `0700` when
 it already exists. Backup database and metadata files are written with mode
 `0600`; metadata is published last and is the success marker. `verify` accepts
-only committed backup IDs in Milestone 2. Public release restore and remote
-upload remain assigned to later milestones.
+only committed backup IDs. Manual restore accepts a protected release ID rather
+than a raw backup ID. Remote upload remains assigned to Milestone 7.
 
 The rehearsal and candidate lifecycle APIs remain internal implementation
 stages of `deploy`. A configured migration command must use `database.path_env`

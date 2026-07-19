@@ -26,6 +26,11 @@ def test_help_succeeds() -> None:
     assert "status" in result.output
     assert "backup" in result.output
     assert "verify" in result.output
+    assert "deploy" in result.output
+    assert "releases" in result.output
+    assert "release" in result.output
+    assert "restore" in result.output
+    assert "recover" in result.output
     assert "Traceback" not in result.output
 
 

@@ -8,6 +8,7 @@ import os
 import re
 import stat
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Final, cast
@@ -15,7 +16,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from dploydb.errors import OperationFailedError, StateCorruptionError
+from dploydb.errors import OperationFailedError, SafetyCheckError, StateCorruptionError
 from dploydb.models import (
     DeploymentState,
     FailureRecord,
@@ -125,6 +126,18 @@ _UNSET = object()
 _IGNORABLE_DIRECTORY_FSYNC_ERRORS = frozenset({errno.EINVAL, errno.ENOTSUP})
 
 
+@dataclass(frozen=True, slots=True)
+class ReleaseHistorySnapshot:
+    """One strictly validated, read-only view of local release history."""
+
+    releases: tuple[ReleaseManifest, ...]
+    pointers: ReleasePointers | None
+
+    def find(self, release_id: str) -> ReleaseManifest | None:
+        """Return one release from this validated snapshot without filesystem access."""
+        return next((item for item in self.releases if item.release_id == release_id), None)
+
+
 class ReleaseStore:
     """Persist strict redacted release summaries without rewriting history."""
 
@@ -167,6 +180,7 @@ class ReleaseStore:
             ) from exc
         now = self._now()
         manifest = ReleaseManifest(
+            recovery_protocol_version=2,
             release_id=release_id,
             operation_id=operation_id,
             project=self.secrets.redact_text(project),
@@ -230,6 +244,60 @@ class ReleaseStore:
             "failure": failure,
         }
         changes.update({name: value for name, value in supplied.items() if value is not _UNSET})
+        updated = current.model_copy(update=changes)
+        persisted = ReleaseManifest.model_validate_json(updated.model_dump_json())
+        self._atomic_write(self._manifest_path(release_id), persisted)
+        return self.read_manifest(release_id)
+
+    def record_recovery_intent(
+        self,
+        release_id: str,
+        *,
+        production_migration_started: bool = False,
+        traffic_activation_attempted: bool = False,
+    ) -> ReleaseManifest:
+        """Durably mark a side-effect window before invoking the external action."""
+        if not production_migration_started and not traffic_activation_attempted:
+            raise ValueError("at least one recovery intent must be recorded")
+        current = self.read_manifest(release_id)
+        if current.status in _TERMINAL_STATES:
+            raise ValueError("terminal release recovery intent is immutable")
+        changes: dict[str, Any] = {"updated_at": self._now_not_before(current.updated_at)}
+        if production_migration_started:
+            changes["production_migration_started"] = True
+        if traffic_activation_attempted:
+            changes["traffic_activation_attempted"] = True
+        updated = current.model_copy(update=changes)
+        persisted = ReleaseManifest.model_validate_json(updated.model_dump_json())
+        self._atomic_write(self._manifest_path(release_id), persisted)
+        return self.read_manifest(release_id)
+
+    def resolve_recovery(
+        self,
+        release_id: str,
+        *,
+        status: DeploymentState,
+        recovery_operation_id: str,
+        traffic_activated: bool,
+    ) -> ReleaseManifest:
+        """Resolve recovery-required state while preserving its original failure."""
+        if status not in {DeploymentState.ACTIVE, DeploymentState.ROLLED_BACK}:
+            raise ValueError("recovery can resolve only to active or rolled_back")
+        current = self.read_manifest(release_id)
+        if current.status is not DeploymentState.RECOVERY_REQUIRED or current.failure is None:
+            raise ValueError("release is not recovery_required with preserved failure evidence")
+        now = self._now_not_before(current.updated_at)
+        changes: dict[str, Any] = {
+            "status": status,
+            "updated_at": now,
+            "completed_at": now,
+            "traffic_activated": traffic_activated,
+            "recovery_operation_id": recovery_operation_id,
+            "recovered_at": now,
+            "recovery_failure": current.failure,
+        }
+        if status is DeploymentState.ACTIVE:
+            changes["failure"] = None
         updated = current.model_copy(update=changes)
         persisted = ReleaseManifest.model_validate_json(updated.model_dump_json())
         self._atomic_write(self._manifest_path(release_id), persisted)
@@ -303,6 +371,73 @@ class ReleaseStore:
             return None
         return self.read_manifest(pointers.previous_release_id)
 
+    def read_history(self) -> ReleaseHistorySnapshot:
+        """Validate and return every release without creating or rewriting state."""
+        if not self.state_directory.exists():
+            self._reject_symlink(self.state_directory)
+            return ReleaseHistorySnapshot(releases=(), pointers=None)
+        self._validate_directory(self.state_directory)
+        if not self.releases_directory.exists():
+            self._reject_symlink(self.releases_directory)
+            return ReleaseHistorySnapshot(releases=(), pointers=None)
+        self._validate_directory(self.releases_directory)
+
+        manifests: list[ReleaseManifest] = []
+        for entry in self.releases_directory.iterdir():
+            if entry.name == POINTER_FILE_NAME:
+                if entry.is_symlink() or not entry.is_file():
+                    raise self._corruption_error("release pointer is not a regular file", entry)
+                continue
+            if (
+                entry.is_symlink()
+                or not entry.is_dir()
+                or _RELEASE_ID.fullmatch(entry.name) is None
+            ):
+                raise self._corruption_error(
+                    f"releases directory contains an unexpected entry: {entry.name}", entry
+                )
+            self._validate_release_directory_contents(entry)
+            manifests.append(self.read_manifest(entry.name))
+
+        pointers = self.read_pointers()
+        release_ids = {item.release_id for item in manifests}
+        if pointers is not None:
+            selected_ids = {pointers.active_release_id}
+            if pointers.previous_release_id is not None:
+                selected_ids.add(pointers.previous_release_id)
+            if not selected_ids.issubset(release_ids):
+                raise self._corruption_error(
+                    "release pointers select a manifest missing from history", self.pointer_path
+                )
+        manifests.sort(key=lambda item: (item.started_at, item.release_id), reverse=True)
+        return ReleaseHistorySnapshot(releases=tuple(manifests), pointers=pointers)
+
+    def lookup_history_release(
+        self, release_id: str
+    ) -> tuple[ReleaseManifest, ReleasePointers | None]:
+        """Resolve one user-selected release from a fully validated history snapshot."""
+        try:
+            self._validate_release_id(release_id)
+        except (TypeError, ValueError):
+            raise SafetyCheckError(
+                "release ID is invalid",
+                production_changed=False,
+                previous_application_running=None,
+                log_path=self.releases_directory,
+                next_safe_action="Copy an exact release ID from dploydb releases.",
+            ) from None
+        history = self.read_history()
+        selected = history.find(release_id)
+        if selected is None:
+            raise SafetyCheckError(
+                f"release does not exist: {release_id}",
+                production_changed=False,
+                previous_application_running=None,
+                log_path=self.releases_directory,
+                next_safe_action="Run dploydb releases and select an existing release ID.",
+            )
+        return selected, history.pointers
+
     def _ensure_layout(self) -> None:
         self._ensure_directory(self.state_directory, parents=True)
         self._ensure_directory(self.releases_directory, parents=False)
@@ -313,6 +448,16 @@ class ReleaseStore:
 
     def _manifest_path(self, release_id: str) -> Path:
         return self._release_directory(release_id) / "manifest.json"
+
+    def _validate_release_directory_contents(self, directory: Path) -> None:
+        self._validate_directory(directory)
+        entries = tuple(directory.iterdir())
+        expected = directory / "manifest.json"
+        if len(entries) != 1 or entries[0] != expected:
+            unexpected = next((entry for entry in entries if entry != expected), directory)
+            raise self._corruption_error(
+                "release directory must contain exactly one manifest", unexpected
+            )
 
     def _validate_release_id(self, release_id: str) -> None:
         if not isinstance(release_id, str) or _RELEASE_ID.fullmatch(release_id) is None:
