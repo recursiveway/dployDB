@@ -1,6 +1,7 @@
 """Command-line interface for DployDB."""
 
 import json
+import os
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated, NoReturn, cast
@@ -55,8 +56,13 @@ from dploydb.releases import ReleaseHistorySnapshot, ReleaseStore
 app = typer.Typer(
     help="Deployment safety for SQLite applications.",
     no_args_is_help=True,
+    rich_markup_mode=None,
 )
-release_app = typer.Typer(help="Inspect one durable deployment release.", no_args_is_help=True)
+release_app = typer.Typer(
+    help="Inspect one durable deployment release.",
+    no_args_is_help=True,
+    rich_markup_mode=None,
+)
 app.add_typer(release_app, name="release")
 console = Console(color_system=None, highlight=False, markup=False)
 
@@ -627,6 +633,7 @@ def _version_callback(value: bool) -> None:
 
 @app.callback()
 def main(
+    context: typer.Context,
     show_version: Annotated[
         bool | None,
         typer.Option(
@@ -636,8 +643,17 @@ def main(
             help="Show the installed DployDB version and exit.",
         ),
     ] = None,
+    no_color: Annotated[
+        bool,
+        typer.Option(
+            "--no-color",
+            help="Disable terminal color; the NO_COLOR environment variable is also honored.",
+        ),
+    ] = False,
 ) -> None:
     """Deployment safety for SQLite applications."""
+    if no_color or "NO_COLOR" in os.environ:
+        context.color = False
 
 
 @app.command("version")

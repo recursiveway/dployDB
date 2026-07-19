@@ -33,6 +33,8 @@ from dploydb.redaction import JsonValue, SecretRegistry
 DIRECTORY_MODE: Final = 0o700
 FILE_MODE: Final = 0o600
 MAX_EVENT_BYTES: Final = 1024 * 1024
+MAX_EVENT_COUNT: Final = 256
+MAX_EVENT_LOG_BYTES: Final = 32 * 1024 * 1024
 
 _OPERATION_ID = re.compile(r"^op_[0-9a-f]{32}$")
 _TEMP_FILE = re.compile(r"^\.manifest\.json\.[0-9a-f]{32}\.tmp$")
@@ -254,7 +256,7 @@ class StateStore:
     def read_events(self, operation_id: str) -> list[OperationEvent]:
         """Read an event trail without repairing malformed evidence."""
         path = self.operation_paths(operation_id).events
-        data = self._read_private_file(path)
+        data = self._read_private_file(path, maximum_bytes=MAX_EVENT_LOG_BYTES)
         try:
             text = data.decode("utf-8")
         except UnicodeError:
@@ -265,6 +267,10 @@ class StateStore:
         events: list[OperationEvent] = []
         previous_timestamp: datetime | None = None
         for sequence, line in enumerate(text.splitlines(), start=1):
+            if sequence > MAX_EVENT_COUNT:
+                raise self._corruption_error(
+                    f"operation event log exceeds the {MAX_EVENT_COUNT}-record limit", path
+                )
             if not line:
                 raise self._corruption_error("operation event log contains an empty record", path)
             if len(line.encode("utf-8")) + 1 > MAX_EVENT_BYTES:
@@ -429,6 +435,18 @@ class StateStore:
         payload = self._json_bytes(event.model_dump(mode="json")) + b"\n"
         if len(payload) > MAX_EVENT_BYTES:
             raise ValueError(f"serialized operation event exceeds {MAX_EVENT_BYTES} bytes")
+        if expected_existing >= MAX_EVENT_COUNT:
+            raise ValueError(f"operation event log cannot exceed {MAX_EVENT_COUNT} records")
+        try:
+            existing_size = paths.events.stat().st_size if paths.events.exists() else 0
+        except OSError as exc:
+            raise self._corruption_error(
+                f"operation event log could not be inspected before append: {exc}", paths.events
+            ) from None
+        if expected_existing and existing_size == 0:
+            raise self._corruption_error("operation event log disappeared", paths.events)
+        if existing_size + len(payload) > MAX_EVENT_LOG_BYTES:
+            raise ValueError(f"operation event log cannot exceed {MAX_EVENT_LOG_BYTES} bytes")
         self._reject_symlink(paths.events)
         flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY
         flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -456,7 +474,7 @@ class StateStore:
                 except OSError:
                     pass
 
-    def _read_private_file(self, path: Path) -> bytes:
+    def _read_private_file(self, path: Path, *, maximum_bytes: int | None = None) -> bytes:
         self._reject_symlink(path)
         try:
             details = path.stat()
@@ -464,6 +482,8 @@ class StateStore:
                 raise OSError("not a regular file")
             if stat.S_IMODE(details.st_mode) != FILE_MODE:
                 raise OSError(f"unsafe mode {stat.S_IMODE(details.st_mode):04o}")
+            if maximum_bytes is not None and details.st_size > maximum_bytes:
+                raise OSError(f"file exceeds the {maximum_bytes}-byte limit")
             return path.read_bytes()
         except OSError as exc:
             raise self._corruption_error(

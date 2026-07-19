@@ -1,12 +1,29 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
 name = "dploydb"
 version = "0.1.0"
 description = "Deployment safety for SQLite applications"
+readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "RecursiveWay" },
+]
+keywords = ["backup", "deployment", "docker-compose", "sqlite"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: System :: Archiving :: Backup",
+]
 dependencies = [
     "boto3>=1.40.0",
     "httpx>=0.28.1",
@@ -15,6 +32,12 @@ dependencies = [
     "rich>=13.9.4",
     "typer>=0.16.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/recursiveway/dployDB"
+Repository = "https://github.com/recursiveway/dployDB"
+Issues = "https://github.com/recursiveway/dployDB/issues"
+Documentation = "https://github.com/recursiveway/dployDB/tree/main/docs"
 
 [project.scripts]
 dploydb = "dploydb.cli:app"
@@ -25,11 +48,33 @@ dev = [
     "pipx>=1.7.1",
     "pytest>=8.4.1",
     "ruff>=0.12.0",
+    "twine>=6.1.0,<7",
     "types-pyyaml>=6.0.12.20250516",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["dploydb"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/.gitignore",
+    "/CHANGELOG.md",
+    "/CODE_OF_CONDUCT.md",
+    "/CONTRIBUTING.md",
+    "/LICENSE",
+    "/NOTICE",
+    "/README.md",
+    "/RELEASING.md",
+    "/SECURITY.md",
+    "/demo",
+    "/docs",
+    "/dploydb",
+    "/examples",
+    "/pyproject.toml",
+    "/scripts",
+    "/tests",
+    "/uv.lock",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

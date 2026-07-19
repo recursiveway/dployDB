@@ -17,7 +17,7 @@ import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEMO_DIR = REPO_ROOT / "demo"
@@ -37,6 +37,10 @@ MIGRATION_TIMEOUT_SECONDS = 30.0
 HEALTH_DEADLINE_SECONDS = 30.0
 HTTP_TIMEOUT_SECONDS = 2.0
 DIAGNOSTIC_LIMIT = 12_000
+DPLOYDB_PRODUCTION_ROLE_LABEL = "io.dploydb.role"
+DPLOYDB_PRODUCTION_ROLE = "production_release"
+COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
+COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
 
 
 class DemoError(Exception):
@@ -240,6 +244,141 @@ def compose_down(context: DemoContext, release: str) -> None:
     )
 
 
+def _inspect_json(
+    context: DemoContext,
+    release: str,
+    resource: str,
+    identifiers: Sequence[str],
+) -> list[dict[str, Any]]:
+    if not identifiers:
+        return []
+    result = run_command(
+        ["docker", resource, "inspect", *identifiers],
+        environment=command_environment(context, release),
+        timeout=COMMAND_TIMEOUT_SECONDS,
+        operation=f"inspecting demo {resource} resources",
+    )
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        fail(f"docker returned invalid {resource} inspection JSON: {exc}")
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        fail(f"docker returned invalid {resource} inspection structure")
+    return value
+
+
+def _managed_release_project(context: DemoContext, record: dict[str, Any]) -> str | None:
+    mounts = record.get("Mounts")
+    if not isinstance(mounts, list):
+        fail("DployDB release inspection omitted container mounts")
+    expected_data = context.data_dir.resolve()
+    uses_demo_database = False
+    for mount in mounts:
+        if not isinstance(mount, dict):
+            fail("DployDB release inspection contains an invalid mount")
+        source = mount.get("Source")
+        destination = mount.get("Destination")
+        read_write = mount.get("RW")
+        if isinstance(source, str) and Path(source).resolve() == expected_data:
+            if destination != "/data" or read_write is not True:
+                fail("DployDB release has an unsafe demo database mount")
+            uses_demo_database = True
+    if not uses_demo_database:
+        return None
+
+    config = record.get("Config")
+    host = record.get("HostConfig")
+    name = record.get("Name")
+    if not isinstance(config, dict) or not isinstance(host, dict) or not isinstance(name, str):
+        fail("DployDB release inspection omitted identity or port configuration")
+    labels = config.get("Labels")
+    bindings = host.get("PortBindings")
+    if not isinstance(labels, dict) or not isinstance(bindings, dict):
+        fail("DployDB release inspection omitted labels or port bindings")
+    project = labels.get(COMPOSE_PROJECT_LABEL)
+    safe_project = re.sub(r"[^a-z0-9_-]", "-", context.project_name.lower())
+    safe_project = safe_project.strip("-_") or "app"
+    expected_prefix = f"dploydb-{safe_project[:20]}-release-"
+    if (
+        not isinstance(project, str)
+        or not project.startswith(expected_prefix)
+        or labels.get(DPLOYDB_PRODUCTION_ROLE_LABEL) != DPLOYDB_PRODUCTION_ROLE
+        or labels.get(COMPOSE_SERVICE_LABEL) != "app"
+        or name.removeprefix("/") != f"{project}-app"
+    ):
+        fail("DployDB release using the demo database has a contradictory identity")
+    port_bindings = bindings.get("8080/tcp")
+    if not isinstance(port_bindings, list) or len(port_bindings) != 1:
+        fail("DployDB release using the demo database has ambiguous port bindings")
+    binding = port_bindings[0]
+    if not isinstance(binding, dict) or binding.get("HostIp") != "127.0.0.1":
+        fail("DployDB release using the demo database is not loopback-only")
+    if binding.get("HostPort") != str(context.port):
+        fail("DployDB release using the demo database has the wrong host port")
+    return project
+
+
+def cleanup_dploydb_releases(context: DemoContext) -> None:
+    """Remove only DployDB-created demo release resources proven by mount and port."""
+    listed = run_command(
+        [
+            "docker",
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--filter",
+            f"label={DPLOYDB_PRODUCTION_ROLE_LABEL}={DPLOYDB_PRODUCTION_ROLE}",
+        ],
+        environment=command_environment(context, "v2"),
+        timeout=COMMAND_TIMEOUT_SECONDS,
+        operation="listing DployDB demo release containers",
+    )
+    identifiers = tuple(item for item in listed.stdout.splitlines() if item)
+    records = _inspect_json(context, "v2", "container", identifiers)
+    selected: list[str] = []
+    projects: set[str] = set()
+    for identifier, record in zip(identifiers, records, strict=True):
+        project = _managed_release_project(context, record)
+        if project is not None:
+            selected.append(identifier)
+            projects.add(project)
+    if selected:
+        run_command(
+            ["docker", "container", "rm", "--force", *selected],
+            environment=command_environment(context, "v2"),
+            timeout=COMMAND_TIMEOUT_SECONDS,
+            operation="removing proven DployDB demo release containers",
+        )
+
+    for project in sorted(projects):
+        listed_networks = run_command(
+            [
+                "docker",
+                "network",
+                "ls",
+                "--quiet",
+                "--filter",
+                f"label={COMPOSE_PROJECT_LABEL}={project}",
+            ],
+            environment=command_environment(context, "v2"),
+            timeout=COMMAND_TIMEOUT_SECONDS,
+            operation="listing DployDB demo release networks",
+        )
+        network_ids = tuple(item for item in listed_networks.stdout.splitlines() if item)
+        network_records = _inspect_json(context, "v2", "network", network_ids)
+        for identifier, record in zip(network_ids, network_records, strict=True):
+            labels = record.get("Labels")
+            if not isinstance(labels, dict) or labels.get(COMPOSE_PROJECT_LABEL) != project:
+                fail("DployDB demo network inspection contradicted its project filter")
+            run_command(
+                ["docker", "network", "rm", identifier],
+                environment=command_environment(context, "v2"),
+                timeout=COMMAND_TIMEOUT_SECONDS,
+                operation="removing a proven DployDB demo release network",
+            )
+
+
 def safe_reset_state(context: DemoContext) -> None:
     instance_dir = context.instance_dir.resolve()
     state_root = context.state_root.resolve()
@@ -434,6 +573,7 @@ def start_release(context: DemoContext, release: str) -> None:
 
 def reset_to_v1(context: DemoContext) -> None:
     compose_down(context, "v1")
+    cleanup_dploydb_releases(context)
     safe_reset_state(context)
     migrate_release(context, "v1")
 
@@ -485,6 +625,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
             print("healthy: ok")
         elif options.command == "stop":
             compose_down(context, "v1")
+            cleanup_dploydb_releases(context)
         else:  # pragma: no cover - argparse enforces the command set.
             fail(f"unsupported command: {options.command}")
     except DemoError as exc:

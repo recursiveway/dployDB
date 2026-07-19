@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security report
+    url: https://github.com/recursiveway/dployDB/security/advisories/new
+    about: Report vulnerabilities privately; never publish secrets or production evidence.
+  - name: Supported scope and limitations
+    url: https://github.com/recursiveway/dployDB/blob/main/docs/limitations.md
+    about: Check whether the request fits the current Alpha boundary.

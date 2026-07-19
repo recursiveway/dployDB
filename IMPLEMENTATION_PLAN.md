@@ -70,9 +70,19 @@ The product must be useful after the hackathon. Do not build fake progress scree
 - **Milestone 4 slices:** 4A isolated Docker Compose runner, 4B bounded
   HTTP readiness and optional smoke checks, and 4C durable candidate-validation
   orchestration plus the real old-application-continuity gate.
-- **Current milestone:** Milestone 7 — S3-compatible verified backup and
+- **Completed milestone:** Milestone 7 — S3-compatible verified backup and
   retention (`COMPLETE` on 2026-07-19). All slices 7A through 7G and the live
-  Cloudflare R2 acceptance gate passed; Milestone 8 is the next allowed work.
+  Cloudflare R2 acceptance gate passed.
+- **Current milestone:** Milestone 8 — real-world usability and packaging
+  (`COMPLETE` on 2026-07-19). Slices 8A through 8C, the complete regression
+  suite, installed-wheel audit, and clean-Linux README-only gate passed;
+  Milestone 9 is the next allowed work.
+- **Current release-readiness slice:** DployDB 0.1.0 Alpha publication
+  (`LOCAL GATE COMPLETE; PUBLICATION PENDING` on 2026-07-19). This bounded post-Milestone-8 slice owns the
+  Apache-2.0 license, public package metadata, distribution-content boundary,
+  community/release policies, release verification, and least-privilege
+  GitHub/TestPyPI/PyPI workflows. It does not change deployment behavior,
+  durable state, rollback rules, or any public CLI/JSON contract.
 - **Dependency workflow:** Use uv for project dependencies and development commands. Support and verify `pipx install .` as the isolated end-user installation path.
 - **Repository outcome:** Every existing `.gitignore` rule remains, including `IMPLEMENTATION_PLAN.md`; `demo/.state/` was added for generated demo databases.
 
@@ -2126,6 +2136,286 @@ Live-service acceptance evidence:
 
 Milestone 7 is complete. Milestone 8 is the next allowed work; no dashboard or
 other later-scope feature was started.
+
+#### Milestone 8 implementation scope
+
+Planned on 2026-07-19:
+
+- **Owned modules and artifacts:** `dploydb/cli.py`, narrowly related CLI and
+  packaging tests, `pyproject.toml`, installation/acceptance helpers under
+  `scripts/`, real-user documentation under `docs/` and `examples/`, and
+  `README.md`.
+- **Preserved safety boundary:** Milestone 8 does not redesign the deployment
+  coordinator, durable state model, backup/restore engine, configuration
+  schema, or rollback rules. Any change at those boundaries requires a newly
+  identified acceptance gap and focused regression evidence before use.
+- **CLI boundary:** provide an explicit global `--no-color` option and standard
+  `NO_COLOR` support, keep JSON output as one ANSI-free document, prove all
+  machine-readable paths avoid terminal prompts, and audit every required
+  command's help text.
+- **Evidence-size boundary:** preserve append-only failure evidence while
+  proving that each release has a finite event count and every persisted
+  command, health response, container log, release manifest, and individual
+  event has a tested byte bound. Do not rotate or delete active failure
+  evidence.
+- **Packaging boundary:** build both wheel and source distribution, verify the
+  installed console entry point from an isolated `pipx` environment, and add
+  sufficient project metadata for a real distributable artifact.
+- **Documentation boundary:** provide one README-first installation and demo
+  path, clear first-run production setup, complete configuration examples, one
+  Nginx maintenance/traffic integration, security guidance, honest supported
+  limits and post-traffic rollback boundary, and uninstall instructions that
+  preserve state and backups.
+- **Final gate:** a clean Linux environment must install the built artifact and
+  run the documented deterministic demo without relying on an existing virtual
+  environment. The gate must also parse a real JSON deployment result and
+  audit the complete required help surface.
+
+Progress tracker:
+
+- [x] Milestone 8 overall — real-world usability and packaging (`COMPLETE` on
+  2026-07-19).
+  - [x] 8A — CLI, bounded evidence, help, and package usability (`COMPLETE` on
+    2026-07-19).
+  - [x] 8B — first-run, Nginx, security, limitations, and uninstall docs
+    (`COMPLETE` on 2026-07-19).
+  - [x] 8C — clean-Linux README-only installation and demo acceptance gate
+    (`COMPLETE` on 2026-07-19).
+
+Tracking rule: complete 8A and 8B with focused tests before starting the clean
+Linux gate. Mark Milestone 8 complete only after the exact final commands and
+observed results are recorded here; a local development-environment pass is
+not evidence for the clean-install claim.
+
+##### 8A — CLI, bounded evidence, help, and package usability
+
+Status on 2026-07-19: `COMPLETE`. The root CLI now exposes `--no-color`, honors
+the standard `NO_COLOR` environment marker, and uses a plain help/error renderer
+so JSON and help output cannot contain ANSI escapes. Every required command and
+nested release command has an installed help audit. Existing JSON and
+confirmation tests plus the new contract prove that machine-readable preview
+paths do not read the terminal and confirmed automation uses explicit
+`--non-interactive` or `--yes` behavior.
+
+Append-only operation evidence now has three independent finite bounds: at
+most 1 MiB per event, 256 events, and 32 MiB for the complete operation log.
+Existing command, container-log, smoke, health-response, release-manifest, and
+backup-metadata limits remain enforced; over-limit durable evidence is treated
+as recovery-required corruption rather than truncated or repaired silently.
+
+Packaging metadata now names the README, supported Python/Linux environment,
+console purpose, and searchable topics. The isolated installer accepts either
+source or a built wheel and audits every help command, version aliases,
+ANSI-free JSON initialization, and `pipx uninstall` preservation of user-owned
+configuration and backup sentinel bytes.
+
+Acceptance evidence:
+
+- `.venv/bin/pytest -q tests/test_cli.py tests/unit/test_deploy_cli.py
+  tests/unit/test_restore_cli.py tests/unit/test_recover_cli.py
+  tests/unit/test_release_cli.py tests/unit/test_diagnostics.py
+  tests/integration/test_backup_cli.py tests/unit/test_milestone8_cli.py
+  tests/unit/test_state.py` — passed (`118 passed in 3.72s`) with required
+  loopback access.
+- `.venv/bin/ruff check ...`, format check, and `.venv/bin/mypy dploydb` —
+  passed; strict mypy checked all `34` package modules.
+- `uv lock --check && uv build` — passed; rebuilt the source distribution and
+  wheel from the updated metadata.
+- `.venv/bin/python scripts/verify_pipx_install.py
+  dist/dploydb-0.1.0-py3-none-any.whl` — passed the isolated wheel install,
+  complete help/JSON/version audit, uninstall, and preservation checks.
+
+##### 8B — First-run, Nginx, security, limitations, and uninstall docs
+
+Status on 2026-07-19: `COMPLETE`. The README now starts with an installed-CLI
+demo path that prepares private absolute-path inputs, runs `doctor --deep`,
+performs the real v1-to-v2 deployment, parses its JSON result, and preserves
+generated evidence during normal stop. A production first-run guide covers
+host ownership, install, configuration, runtime credentials, baseline backup,
+diagnostics, and result handling. Separate security, supported-limit, rollback,
+post-traffic data-loss, and backup-preserving uninstall guides make the trust
+and recovery boundaries explicit.
+
+The Nginx example uses a fixed loopback production port and a per-request
+maintenance marker; it never routes users to the candidate port. Its Python
+hook is bounded and idempotent, rejects target changes outside maintenance,
+rejects symlinks and malformed/unsafe evidence, atomically publishes a private
+old/new target record, and syncs managed filesystem changes. Its complete YAML
+example passes the production configuration parser.
+
+Acceptance evidence:
+
+- `.venv/bin/pytest -q tests/integration/test_demo_prepare.py
+  tests/integration/test_nginx_hook_example.py
+  tests/unit/test_milestone8_docs.py tests/unit/test_milestone8_cli.py
+  tests/unit/test_state.py` — passed as part of the focused Milestone 8 gate
+  (`68 passed in 1.01s`).
+- `.venv/bin/ruff check ...` and format check passed for the demo preparer,
+  executable Nginx hook, and documentation tests; `.venv/bin/mypy demo` passed
+  all `9` demo modules.
+- Documentation tests proved every local link resolves, required quick-start
+  commands and safety warnings are present, the uninstall guide contains no
+  recursive deletion shortcut, and the Nginx site has no candidate upstream.
+
+##### 8C — Clean-Linux README-only installation and demo acceptance gate
+
+Status on 2026-07-19: `COMPLETE`. The acceptance helper builds a source bundle
+from the current tracked/untracked non-ignored worktree and boots a uniquely
+named disposable privileged Docker-in-Docker Linux host. It copies in only that
+source bundle and the reviewed wheel, installs Linux prerequisites and the wheel
+with `pipx`, audits all installed help/version/color interfaces, and follows the
+README's real v1-to-v2 workflow. It parses `doctor --deep` and deployment JSON,
+verifies final HTTP health, active release history, SQLite schema version 2,
+and absence of DployDB Compose containers/networks after documented stop.
+
+The demo controller's stop/reset cleanup was extended after the gate exposed
+that a successfully deployed application is an operation-created Compose
+one-off rather than the bootstrap project. Cleanup now selects a release
+container only when its DployDB role, derived project/name, exact demo database
+mount, loopback address, and production port all agree. It then removes only
+that proven container and its exactly labeled project network. This makes the
+README cleanup repeatable without broad name filters or unrelated mutation.
+
+Acceptance evidence:
+
+- `.venv/bin/python scripts/verify_clean_linux.py --wheel
+  dist/dploydb-0.1.0-py3-none-any.whl` — passed in `docker:29.1-dind`, resolved
+  to `docker@sha256:3a33fc81fa4d38360f490f5b900e9846f725db45bb1d9b1fe02d849bd42a5cf2`.
+- The clean host reported Python `3.12.13` and nested Docker `29.1.5`; the
+  source bundle contained `121` files and the wheel SHA-256 was
+  `c1ea21acd1d330661fcd968ee3ecf881156ddf42bf5b8c17a7c8c37082b27f5b`.
+- The shipped `examples/nginx/site.conf` passed the real Alpine Nginx
+  configuration parser with `nginx -t` inside the same clean host.
+- The real JSON result was `outcome=active` for
+  `release_f5bdb593936944feb1b3a05d94eced9d`; traffic activation, HTTP v2
+  health, release pointer, and SQLite v2 schema were independently checked.
+- After normal demo stop there were no Compose-labeled application/candidate
+  containers and no DployDB network. `pipx uninstall` removed the console
+  entry point while preserving all `14` generated database, configuration,
+  backup, release, manifest, and event files byte-for-byte. The outer
+  disposable Linux container was removed successfully.
+
+#### Milestone 8 final acceptance evidence
+
+Observed on 2026-07-19 after all slice changes:
+
+- `.venv/bin/pytest -q` with unrestricted loopback and Docker access — passed
+  (`569 passed in 171.56s`). This includes real backup, candidate, successful
+  cutover, production-migration rollback, final-health rollback, abrupt crash
+  recovery, manual restore, remote retention, demo, and Milestone 8 gates.
+- `.venv/bin/ruff check .` — passed (`All checks passed!`);
+  `.venv/bin/ruff format --check .` — passed (`93 files already formatted`).
+- `.venv/bin/mypy dploydb` and `.venv/bin/mypy demo` — passed in strict mode
+  for all `34` package and `9` demo modules. Both Milestone 8 verification
+  helpers also passed strict mypy.
+- `uv lock --check`, `uv sync --locked --check`, and `uv build` — passed after
+  refreshing the ignored editable environment for the final package metadata;
+  both source and wheel artifacts were built. Final SHA-256 values were
+  `c1ea21acd1d330661fcd968ee3ecf881156ddf42bf5b8c17a7c8c37082b27f5b`
+  for the wheel and
+  `20ca91149ad99a6b11753b1d6a1304bc51731234293e5ea0792a25bf0d5ed9a9`
+  for the source distribution.
+- `.venv/bin/python scripts/verify_pipx_install.py
+  dist/dploydb-0.1.0-py3-none-any.whl` — passed against the final wheel,
+  including every installed help command, version, ANSI-free JSON, uninstall,
+  and preservation audit.
+- `git diff --check` — passed. No generated demo state, Linux acceptance
+  container, inner Compose container/network, credential, or package-manager
+  environment is included in the worktree.
+
+Milestone 8 is complete. Milestone 9 presentation polish is the next allowed
+work; no dashboard, generated release report, schema visualization, or other
+Milestone 9 feature was started.
+
+#### DployDB 0.1.0 Alpha publication readiness
+
+Planned on 2026-07-19:
+
+- **Owned artifacts:** `pyproject.toml`, the public license and community
+  policies, release documentation, package/distribution verification helpers,
+  and GitHub CI/release workflows.
+- **License boundary:** publish the original DployDB work under Apache-2.0,
+  copyright 2026 RecursiveWay, without adding per-file headers or claiming
+  ownership of third-party dependencies.
+- **Package boundary:** retain version `0.1.0` and the Alpha classifier, add
+  PEP 639 metadata and public project links, include license evidence in wheel
+  and source distribution, and exclude local agent settings and internal
+  planning instructions from published artifacts.
+- **Release boundary:** build one reviewed wheel/source pair, verify it on a
+  clean Linux host, publish those exact bytes through protected OIDC Trusted
+  Publishing environments, and finalize a GitHub prerelease only after public
+  installation succeeds. Long-lived PyPI credentials are prohibited.
+- **Public contract boundary:** this slice changes no deployment behavior,
+  command, option, exit code, JSON shape, configuration schema, durable state,
+  recovery protocol, or backup format.
+- **Acceptance gate:** focused metadata/documentation/distribution tests, the
+  complete real Docker/loopback suite, Ruff, format check, strict mypy for the
+  package and demo, fresh build validation, isolated pipx installation, and
+  the clean-Linux README deployment gate must pass before a release tag.
+
+Local acceptance evidence observed on 2026-07-19:
+
+- `.venv/bin/python -m pytest -q` with unrestricted Docker and loopback access
+  passed (`588 passed in 172.25s`), including all prior deployment, rollback,
+  restore, recovery, retention, and clean-state safety coverage plus 19 new
+  release-readiness tests.
+- Focused metadata, public-documentation, workflow, version, and distribution
+  tests passed (`40 passed`). Ruff check and format check passed for all `98`
+  Python files; strict mypy passed for all `34` package modules, `9` demo
+  modules, and `6` release-verification scripts.
+- `uv lock --check` passed with `65` resolved packages. `uv build` produced a
+  wheel from the source distribution, and Twine accepted both artifacts.
+- `scripts/verify_distribution.py --tag v0.1.0` passed. The final wheel contains
+  `40` files with SHA-256
+  `1235050bdcee0688b6bc34b5a642d9f13e235de100ec086bcdb693eb72771d1d`;
+  the allowlisted source distribution contains `131` files with SHA-256
+  `a882f434f0d3238f38eff2a1eb5d5cfc15525fd99292f17c6a253aeda7803532`.
+  Apache-2.0 metadata, repository license/notice bytes, author, Alpha
+  classifier, Python requirement, and project links matched exactly; local
+  agent settings, internal plans, databases, generated state, and credentials
+  were absent.
+- The isolated pipx audit installed the final wheel, verified every required
+  help/version/JSON path, uninstalled it, and preserved configuration and
+  backup bytes. Actionlint `v1.7.7` accepted both pinned GitHub workflows.
+- The disposable `docker:29.1-dind` clean-Linux gate passed with Python 3.12.13
+  and Docker 29.1.5. It installed the final wheel, completed a real deployment
+  with `outcome=active`, preserved all `14` database/state/backup/release files
+  byte-for-byte through uninstall, and removed the inner and outer Docker
+  resources. The verified wheel hash matched the final hash above.
+- `git diff --check` passed. No deployment behavior, command, option, exit code,
+  JSON shape, configuration schema, durable state, recovery protocol, or
+  backup format changed.
+
+GitHub preparation evidence observed on 2026-07-19:
+
+- The release changes are committed on `codex/alpha-release-readiness` and the
+  draft release PR is [recursiveway/dployDB#1](https://github.com/recursiveway/dployDB/pull/1).
+- The `recursiveway` GitHub CLI session was reauthenticated. The repository is
+  public with Issues, secret scanning, push protection, Dependabot alerts and
+  automated security fixes, and private vulnerability reporting enabled.
+- Protected `testpypi` and `pypi` environments require review by a
+  RecursiveWay maintainer. Active GitHub tag ruleset `19168357` protects
+  creation, update, deletion, and non-fast-forward changes for `v*` tags.
+- The first Linux PR gate exposed a platform-dependent SQLite test expectation:
+  the GitHub runner returned an immediate safe `database is locked` error where
+  the local SQLite build exhausted `busy_timeout`. The test now accepts either
+  explicit safe result and still proves the operation returns within its bound;
+  production behavior remains unchanged.
+- GitHub Actions run
+  [`29684025591`](https://github.com/recursiveway/dployDB/actions/runs/29684025591)
+  passed the complete `Safety and package gate` on Ubuntu in 2m52s: locked
+  dependency sync, Ruff, format, strict mypy, all `588` tests, and the clean
+  wheel/source build and distribution audit.
+- `main` now requires that exact successful check with strict up-to-date branch
+  enforcement. Protection includes administrators, requires linear history and
+  resolved review conversations, and prohibits force-pushes and deletion.
+
+Status: `LOCAL GATE COMPLETE; PUBLICATION PENDING`. No signed `v0.1.0` tag
+exists. The dedicated SSH signing key, matching TestPyPI/PyPI pending Trusted
+Publishers, release PR merge, registry uploads, and GitHub prerelease still
+require their ordered external gates. Registry URLs, public hashes, signed-tag
+evidence, and GitHub prerelease evidence must be appended here after those
+gates pass. The release must not be called published before that verification.
 
 ---
 

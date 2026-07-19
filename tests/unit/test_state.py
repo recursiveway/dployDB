@@ -15,7 +15,14 @@ from pydantic import ValidationError
 from dploydb.errors import StateCorruptionError
 from dploydb.models import FailureRecord, OperationStatus, SafetyFacts
 from dploydb.redaction import REDACTION_MARKER, SecretRegistry
-from dploydb.state import DIRECTORY_MODE, FILE_MODE, MAX_EVENT_BYTES, StateStore
+from dploydb.state import (
+    DIRECTORY_MODE,
+    FILE_MODE,
+    MAX_EVENT_BYTES,
+    MAX_EVENT_COUNT,
+    MAX_EVENT_LOG_BYTES,
+    StateStore,
+)
 
 FINGERPRINT = "a" * 64
 
@@ -300,6 +307,55 @@ def test_event_size_limit_preserves_existing_state(store: StateStore) -> None:
 
     assert paths.manifest.read_bytes() == before_manifest
     assert paths.events.read_bytes() == before_events
+
+
+def test_event_count_limit_preserves_existing_state(
+    store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = create_operation(store)
+    paths = store.operation_paths(manifest.operation_id)
+    monkeypatch.setattr("dploydb.state.MAX_EVENT_COUNT", 1)
+    before_manifest = paths.manifest.read_bytes()
+    before_events = paths.events.read_bytes()
+
+    with pytest.raises(ValueError, match="cannot exceed 1 records"):
+        store.append_event(manifest.operation_id, message="One event too many.")
+
+    assert paths.manifest.read_bytes() == before_manifest
+    assert paths.events.read_bytes() == before_events
+
+
+def test_event_log_byte_limit_preserves_existing_state(
+    store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = create_operation(store)
+    paths = store.operation_paths(manifest.operation_id)
+    before_manifest = paths.manifest.read_bytes()
+    before_events = paths.events.read_bytes()
+    monkeypatch.setattr("dploydb.state.MAX_EVENT_LOG_BYTES", len(before_events) + 1)
+
+    with pytest.raises(ValueError, match="cannot exceed"):
+        store.append_event(manifest.operation_id, message="This cannot fit.")
+
+    assert paths.manifest.read_bytes() == before_manifest
+    assert paths.events.read_bytes() == before_events
+
+
+def test_oversized_event_log_is_recovery_required(
+    store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = create_operation(store)
+    paths = store.operation_paths(manifest.operation_id)
+    monkeypatch.setattr("dploydb.state.MAX_EVENT_LOG_BYTES", paths.events.stat().st_size - 1)
+
+    with pytest.raises(StateCorruptionError, match="byte limit"):
+        store.read_events(manifest.operation_id)
+
+
+def test_operation_log_limits_are_finite_and_leave_room_for_bounded_evidence() -> None:
+    assert MAX_EVENT_COUNT >= 128
+    assert MAX_EVENT_LOG_BYTES >= MAX_EVENT_BYTES
+    assert MAX_EVENT_LOG_BYTES <= 64 * 1024 * 1024
 
 
 def test_manifest_file_sync_failure_preserves_previous_complete_manifest(

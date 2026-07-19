@@ -1,10 +1,81 @@
 # DployDB
 
+[![CI](https://github.com/recursiveway/dployDB/actions/workflows/ci.yml/badge.svg)](https://github.com/recursiveway/dployDB/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/dploydb.svg)](https://pypi.org/project/dploydb/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 DployDB is being built as a deployment-safety tool for applications that use one SQLite database on one Linux server.
+
+> [!WARNING]
+> DployDB 0.1.0 is Alpha software. Its safety gates are real and extensively
+> tested, but public interfaces may still change in documented `0.x` minor
+> releases. Read the [supported limits](docs/limitations.md), keep independent
+> backups, and prove the complete failure/restore flow on a non-production host
+> before relying on it for production.
+
+## Quick start: install and run the real deployment demo
+
+This path starts a real v1 Docker Compose application and SQLite database, then
+uses the installed `dploydb` CLI—not the fixture controller—to rehearse, validate,
+and deploy v2. Run it from a checked-out DployDB source tree on Linux with Python
+3.12+, `pipx`, Docker Engine, and the Docker Compose plugin.
+
+```bash
+python3 --version  # must report 3.12 or newer
+pipx --version
+docker version
+docker compose version
+
+git clone https://github.com/recursiveway/dployDB.git
+cd dployDB
+pipx install dploydb==0.1.0
+dploydb --no-color version
+```
+
+Create the known-good v1 application, then generate private absolute-path demo
+configuration. `start-v1` intentionally resets only the selected `quickstart`
+demo instance.
+
+```bash
+python3 demo/controller.py --instance quickstart --port 4510 start-v1
+python3 -m demo.prepare \
+  --instance quickstart --port 4510 --candidate-port 4511
+. demo/.state/quickstart/dploydb.env
+```
+
+Run the complete host audit and deploy v2 with machine-readable output:
+
+```bash
+dploydb --no-color doctor --deep \
+  --config demo/.state/quickstart/dploydb.yaml
+dploydb --no-color deploy --version v2 \
+  --config demo/.state/quickstart/dploydb.yaml \
+  --json --non-interactive > /tmp/dploydb-quickstart-result.json
+python3 -c 'import json; p=json.load(open("/tmp/dploydb-quickstart-result.json")); assert p["ok"] is True and p["outcome"] == "active"; print(p["release_id"])'
+curl --fail-with-body http://127.0.0.1:4510/health
+dploydb releases --config demo/.state/quickstart/dploydb.yaml
+```
+
+The JSON assertion proves CI can parse the real deployment result. The v1
+database is migrated to schema version 2, the candidate is tested on an isolated
+copy and port, and normal traffic is activated only after final production
+checks. Stop the demo container without deleting its database, backups, or
+release evidence:
+
+```bash
+python3 demo/controller.py --instance quickstart --port 4510 stop
+```
+
+If either port is already occupied, choose two unused distinct ports in all
+three commands. For production setup, continue with the
+[first-run guide](docs/first-run.md), [Nginx hook example](examples/nginx/README.md),
+[security model](docs/security.md), [limitations](docs/limitations.md), and
+[backup-preserving uninstall](docs/uninstall.md).
 
 ## Current status
 
-Milestones 0 through 7 provide:
+Milestones 0 through 8 provide:
 
 - an installable `dploydb` CLI with help and version commands;
 - strict, duplicate-safe configuration parsing with environment interpolation;
@@ -62,6 +133,13 @@ Milestones 0 through 7 provide:
 - a production-only final-health failure fixture used to prove real cutover
   rollback after candidate validation passes;
 - real SQLite reads, writes, and data-preserving migration behavior.
+- explicit ANSI-free `--no-color`/`NO_COLOR` behavior and installed help audits
+  for every required command;
+- finite per-operation evidence logs, with byte and record-count limits that
+  preserve append-only failure evidence;
+- a clean-Linux-tested installed-CLI quick start, production first-run guide,
+  validated Nginx traffic hooks, security/limitations guidance, and an
+  uninstall path proven to preserve database, backup, release, and event bytes.
 
 The demo controller is **not** the DployDB deployment engine. Migration
 rehearsal and candidate validation are internal stages of the public deployment
@@ -72,21 +150,23 @@ off-server backup, and protected retention are implemented.
 ## Prerequisites
 
 - Python 3.12 or newer
-- [uv](https://docs.astral.sh/uv/)
+- `pipx` for an isolated end-user installation
 - Docker Engine or Docker Desktop
 - Docker Compose
 
-Install the development environment:
+Install the published Alpha CLI:
+
+```bash
+pipx install dploydb==0.1.0
+dploydb version
+```
+
+Contributors can install the checked-out source tree with `pipx install .`.
+
+Repository development and validation use [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv sync --locked
-```
-
-The CLI can also be installed in an isolated environment:
-
-```bash
-pipx install .
-dploydb version
 ```
 
 ## Start working v1
@@ -443,3 +523,31 @@ stages of `deploy`. A configured migration command must use `database.path_env`
 for its database target and must not hard-code the production path or perform
 unrelated production side effects; DployDB does not claim to sandbox an
 arbitrary developer-supplied executable.
+
+## Security, limitations, and removal
+
+- [First production setup](docs/first-run.md)
+- [Security model and trust boundaries](docs/security.md)
+- [Supported scope, rollback boundary, and post-traffic data-loss risk](docs/limitations.md)
+- [Nginx maintenance and fixed-port activation hooks](examples/nginx/README.md)
+- [Uninstalling the CLI without deleting backups or evidence](docs/uninstall.md)
+
+## Alpha lifecycle and compatibility
+
+DployDB follows Semantic Versioning. Compatible `0.1.x` releases contain Alpha
+fixes; later `0.x` minor releases may make documented breaking changes. `0.9.0`
+is reserved for Beta, `1.0.0rc1` for the first release candidate, and `1.0.0`
+for Stable. Durable state is never silently guessed or rewritten: an upgrade
+must provide a tested migration or stop with an exact safe action.
+
+Promotion is based on real deployment, failure-drill, recovery, and soak-time
+evidence—not a calendar date. The exact gates and release procedure are in
+[RELEASING.md](RELEASING.md), and user-visible changes are recorded in
+[CHANGELOG.md](CHANGELOG.md).
+
+## Community and license
+
+DployDB is licensed under the [Apache License 2.0](LICENSE), copyright 2026
+RecursiveWay. Bug reports and pull requests are welcome under
+[CONTRIBUTING.md](CONTRIBUTING.md) and the [community conduct policy](CODE_OF_CONDUCT.md).
+Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).

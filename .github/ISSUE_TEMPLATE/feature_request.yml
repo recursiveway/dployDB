@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose one focused improvement within DployDB's supported scope.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Safety or usability problem
+      description: Describe the user problem without prescribing a large solution.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Explain how an operator can verify success and failure safely.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Supported Alpha scope
+      options:
+        - Fits one Linux VPS, one Compose app, and one SQLite database
+        - Requires a documented future milestone or scope expansion
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Note existing commands or operational workarounds.
