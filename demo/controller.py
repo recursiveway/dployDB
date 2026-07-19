@@ -24,7 +24,13 @@ DEMO_DIR = REPO_ROOT / "demo"
 COMPOSE_FILE = DEMO_DIR / "compose.yaml"
 RELEASES_ROOT = DEMO_DIR / "releases"
 DEFAULT_STATE_ROOT = DEMO_DIR / ".state"
-ALLOWED_RELEASES = ("v1", "v2", "broken-migration", "broken-health")
+ALLOWED_RELEASES = (
+    "v1",
+    "v2",
+    "broken-migration",
+    "broken-health",
+    "final-health-failure",
+)
 INSTANCE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 COMMAND_TIMEOUT_SECONDS = 90.0
 MIGRATION_TIMEOUT_SECONDS = 30.0

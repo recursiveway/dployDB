@@ -43,14 +43,31 @@ The product must be useful after the hackathon. Do not build fake progress scree
   and the real old-application-continuity gate (`COMPLETE` on 2026-07-19).
 - **Completed milestone:** Milestone 4 — candidate application validation against
   the checked rehearsal database (`COMPLETE` on 2026-07-19).
-- **Next slice:** Milestone 5 — controlled production cutover and automatic
-  pre-traffic application/database rollback.
+- **Completed slice:** Milestone 5A — deploy-only production topology, atomic
+  release state, generic application health boundary, and caller-owned
+  pre-cutover candidate stage (`COMPLETE` on 2026-07-19).
+- **Completed slice:** Milestone 5B — bounded command-based maintenance and
+  traffic controller (`COMPLETE` on 2026-07-19).
+- **Completed slice:** Milestone 5C — Docker Compose production application
+  lifecycle and exact previous-application preservation (`COMPLETE` on
+  2026-07-19).
+- **Completed slice:** Milestone 5D — stopped-writer final verified backup,
+  production migration, and caller-owned verified restore transaction
+  (`COMPLETE` on 2026-07-19).
+- **Completed slice:** Milestone 5E — internal deployment coordinator and
+  complete pre-traffic rollback matrix (`COMPLETE` on 2026-07-19).
+- **Completed slice:** Milestone 5F — public deploy CLI, real-Docker success and
+  rollback flows, traffic-isolation proof, packaging, and final resource audit
+  (`COMPLETE` on 2026-07-19).
+- **Completed milestone:** Milestone 5 — controlled cutover and automatic
+  pre-traffic application/database rollback (`COMPLETE` on 2026-07-19).
+- **Next milestone:** Milestone 6 — release history, public manual restore, and
+  interrupted-operation recovery.
 - **Milestone 4 slices:** 4A isolated Docker Compose runner, 4B bounded
   HTTP readiness and optional smoke checks, and 4C durable candidate-validation
   orchestration plus the real old-application-continuity gate.
-- **Not yet implemented:** Production cutover, application rollback, public
-  manual restore, crash recovery, remote storage, and retention from Milestone 5
-  onward.
+- **Not yet implemented:** Public manual restore, crash recovery, remote
+  storage, and retention from Milestone 6 onward.
 - **Dependency workflow:** Use uv for project dependencies and development commands. Support and verify `pipx install .` as the isolated end-user installation path.
 - **Repository outcome:** Every existing `.gitignore` rule remains, including `IMPLEMENTATION_PLAN.md`; `demo/.state/` was added for generated demo databases.
 
@@ -1062,6 +1079,543 @@ Slice 4C and final Milestone 4 acceptance evidence observed on 2026-07-19:
 Milestone 4 is complete. Milestone 5 is the next allowed work; production
 migration, maintenance/traffic hooks, application cutover, and automatic
 pre-traffic rollback remain intentionally unclaimed.
+
+#### Milestone 5 implementation scope
+
+Planned on 2026-07-19:
+
+- **Execution decision:** implement Milestone 5 as six independently gated
+  slices, not as one large change. This is the first milestone allowed to stop
+  the current application, modify the production database, or change traffic.
+  The command hooks, production Compose lifecycle, database transaction,
+  rollback state machine, and public CLI must therefore earn separate gates.
+- **Current-interface audit:** Milestones 2 through 4 already provide the
+  verified online backup, disposable migration rehearsal, isolated candidate,
+  bounded subprocess, HTTP health, durable operation, and exclusive lock
+  primitives. The current application runner intentionally controls candidates
+  only; the health configuration identifies only the candidate endpoint; the
+  stopped-database restore wrapper owns its own lock and operation; and no
+  durable release manifest exists yet. Milestone 5 will extend these boundaries
+  rather than bypass or duplicate them.
+- **Owned modules:** bounded changes to `dploydb/config.py`, `models.py`,
+  `state.py`, `candidate.py`, `health.py`, `restore.py`, `cli.py`, and
+  `runners/base.py`; production lifecycle additions under `dploydb/runners/`;
+  new typed `dploydb/traffic.py`, `dploydb/releases.py`, and `dploydb/deploy.py`;
+  plus focused unit, fault-injection, CLI, and real-Docker integration tests.
+- **Configuration boundary:** add a deploy-only production Compose project,
+  loopback production port/health URL, and a bounded traffic-hook timeout.
+  Existing Milestone 0 through 4 configurations must continue to parse; a
+  deployment must fail before mutation when the new production topology is not
+  configured. Candidate and production ports must be distinct, and both health
+  URLs must remain local HTTP endpoints whose ports match their configured
+  bindings.
+- **Application rollback boundary:** preserve the exact stopped previous
+  container instead of assuming its version can be reconstructed. A first
+  deployment discovers and validates the configured production Compose service;
+  later deployments use the active release manifest's stored application
+  handle. The new release runs in its own release-derived Compose project on the
+  configured production port only after the previous container is proven
+  stopped. The previous container is not deleted during this milestone.
+- **Database rollback boundary:** create and verify the final backup only after
+  application writers are proven stopped. Production migration uses the same
+  configured argument-array command, environment contract, timeout, complete
+  redacted capture, and SQLite checks as rehearsal. Extract a caller-owned,
+  stopped-database restore primitive from the existing restore engine so the
+  deployment coordinator can restore the final backup without taking a nested
+  lock or creating a second operation.
+- **Traffic boundary:** developer hooks are bounded argument arrays executed by
+  the shared subprocess runner with complete redacted evidence. A successful
+  maintenance-on hook is the stored proof that normal traffic remains blocked
+  during cutover. `traffic_activated` is persisted immediately after the
+  activation hook succeeds. No database rollback is permitted after that state.
+- **State boundary:** one deployment lock, one operation event trail, and one
+  atomically updated release manifest cover rehearsal, candidate validation,
+  cutover, and rollback. Candidate validation must become a reusable
+  caller-owned stage while its existing standalone Milestone 4 wrapper keeps the
+  same behavior. Release manifests store requested/previous application
+  identities, rehearsal and final backup IDs/checksums, health and hook evidence,
+  the production-changed and traffic-activated facts, and the operation log path.
+- **CLI boundary:** do not expose `dploydb deploy` until the automatic rollback
+  gate passes. The final command is `deploy --version <version> [--json]
+  [--non-interactive]`; non-interactive mode must never wait for input, and human
+  and JSON results must carry the same safety facts.
+
+Progress tracker:
+
+- [x] Milestone 5 overall — controlled cutover and automatic pre-traffic
+  application/database rollback (`COMPLETE` on 2026-07-19).
+  - [x] 5A — production topology, durable release contracts, and a reusable
+    caller-owned pre-cutover stage (`COMPLETE` on 2026-07-19).
+  - [x] 5B — bounded command-based maintenance and traffic controller
+    (`COMPLETE` on 2026-07-19).
+  - [x] 5C — Docker Compose production application lifecycle and exact previous
+    application preservation (`COMPLETE` on 2026-07-19).
+  - [x] 5D — final backup, production migration, and caller-owned verified
+    database restore transaction (`COMPLETE` on 2026-07-19).
+  - [x] 5E — internal deployment coordinator and complete pre-traffic rollback
+    fault matrix (`COMPLETE` on 2026-07-19).
+  - [x] 5F — public deploy CLI, real-Docker integration gate, packaging, and
+    recorded Milestone 5 evidence (`COMPLETE` on 2026-07-19).
+
+Tracking rule: a later slice starts only after the earlier slice's focused
+tests, full suite, Ruff, formatting, and mypy pass and exact evidence is recorded
+here. The public deployment command remains absent until 5E proves rollback.
+
+##### 5A — Production topology, release state, and reusable pre-cutover stage
+
+Status on 2026-07-19: `COMPLETE`. This slice added no production mutation and
+did not expose `dploydb deploy`.
+
+- Extend configuration with backward-compatible optional production topology
+  fields and a defaulted positive hook timeout. `deploy` requires the complete
+  topology and rejects missing, contradictory, non-loopback, or colliding port
+  settings before acquiring a mutation-capable stage.
+- Add strict release/application-handle models and an atomic private release
+  store. A release record may advance only through the required deployment
+  states, terminal records are immutable, every update references the same
+  operation, and malformed/contradictory state becomes `recovery_required`.
+- Extract the checked rehearsal-plus-candidate work into a caller-owned stage
+  that appends to an existing in-progress operation and returns only after
+  candidate and rehearsal cleanup are proven. Keep
+  `validate_configured_candidate` as the standalone locked Milestone 4 wrapper.
+- Generalize the bounded health boundary only as needed to check a supplied,
+  prevalidated production URL/database path without weakening redirect,
+  deadline, smoke-command, complete-capture, cancellation, or redaction rules.
+
+Slice 5A gate:
+
+- Existing configurations and all Milestone 4 tests remain green; deploy-only
+  validation fails side-effect-free when production topology is absent or
+  unsafe.
+- Atomic release tests cover legal/illegal transitions, permissions, redaction,
+  interruption, terminal immutability, active/previous selection, and
+  contradictory handles/backups/traffic facts.
+- One locked test operation reaches `candidate_healthy` and remains in progress
+  for cutover, while the existing standalone candidate operation still ends
+  successfully at `candidate_healthy` with production unchanged.
+
+Slice 5A acceptance evidence observed on 2026-07-19:
+
+- `.venv/bin/python -m pytest -q tests/unit/test_candidate.py
+  tests/unit/test_health.py tests/unit/test_releases.py tests/test_config.py` —
+  passed (`129 passed in 4.51s`). Configuration coverage proves complete local
+  production topology, distinct production/candidate ports, partial-topology
+  rejection, a defaulted hook timeout, pre-Milestone-5 configuration
+  compatibility, and deploy-only validation with zero filesystem, database,
+  subprocess, or socket access.
+- The caller-owned candidate test created a real `deploy` operation, recorded
+  its matching kernel-lock owner, ran a real SQLite snapshot and migration with
+  injected application/health boundaries, proved candidate and rehearsal
+  cleanup, and observed the operation still `in_progress` at
+  `candidate_healthy`. The production checksum remained identical. The existing
+  standalone wrapper still ended terminal `succeeded` at the same state.
+- Release tests prove strict application handles, legal and illegal deployment
+  transitions, terminal immutability, rehearsal/final backup pairing,
+  application/release identity consistency, traffic/production invariants,
+  mode-0700 directories, mode-0600 manifests, recursive redaction, atomic
+  active/previous selection, malformed/truncated/wrong-mode rejection, and
+  replacement-failure preservation of the prior complete manifest.
+- `.venv/bin/python -m pytest -q
+  tests/fault_injection/test_release_state_interruption.py
+  tests/unit/test_releases.py` — passed (`12 passed in 0.30s`). Real child
+  processes were killed immediately before manifest replacement and immediately
+  after replacement but before directory sync. The durable manifest was always
+  complete old or complete new state; an abandoned pre-replacement temporary
+  file became explicit `recovery_required` evidence rather than being ignored.
+- The generic application health boundary reused the existing fixed deadline,
+  loopback HTTP, redirect refusal, bounded response, smoke timeout/process-group
+  cleanup, complete capture, and redaction behavior. Its focused production-mode
+  test used the supplied production URL/database and proved candidate test-mode
+  environment was not injected; the candidate adapter preserved its public
+  Milestone 4 contract.
+- Final `.venv/bin/python -m pytest -q` — passed with required loopback and
+  Docker access (`378 passed in 94.41s`), preserving every real SQLite/HTTP,
+  Docker Compose, online backup/restore, locking, interruption, process-tree,
+  rehearsal, and candidate-continuity gate.
+- `.venv/bin/ruff check .` — passed (`All checks passed!`); `.venv/bin/ruff
+  format --check .` — passed (`59 files already formatted`).
+- `.venv/bin/mypy dploydb` and `.venv/bin/mypy demo` — passed with no issues in
+  `24` package source files and `6` demo source files.
+- `uv lock --check` and `uv sync --locked --check` — passed with `38` resolved
+  and `37` checked packages; the locked environment required no changes.
+
+Slice 5A is complete. Slice 5B is the next allowed work. No maintenance or
+traffic hook has run, no production application lifecycle or database cutover
+exists, and the public deployment command remains intentionally absent.
+
+##### 5B — Command-based traffic controller
+
+Status on 2026-07-19: `COMPLETE`. This slice owns `dploydb/traffic.py`, the
+defaulted positive `traffic.timeout_seconds` configuration added in 5A, and
+focused unit plus real-process hook tests. It does not stop applications, touch
+SQLite, change durable deployment state, or expose a deployment command.
+
+- Add a narrow `TrafficController` interface and command implementation for
+  maintenance on/off and new/old target activation.
+- Execute every hook as an argument array with its configured positive timeout,
+  exact environment and working directory, process-group cleanup, bounded
+  complete output, and redaction before evidence leaves the controller.
+- Return typed evidence for every terminal outcome. Never infer that a hook's
+  side effect occurred from a running process or hide a timeout, cancellation,
+  truncated output, or cleanup failure.
+
+Slice 5B gate:
+
+- Unit and real-process tests cover exact commands, ordering, success, non-zero
+  exit, missing executable, timeout/descendant cleanup, cancellation,
+  truncation, secret output, and retry-safe evidence.
+- A maintenance-on failure proves no application or database method was called;
+  a maintenance-off or target-activation failure remains explicit for the later
+  rollback state machine.
+
+Slice 5B acceptance evidence observed on 2026-07-19:
+
+- `.venv/bin/python -m pytest -q tests/unit/test_traffic.py` — passed (`8 passed
+  in 1.27s`). All four hooks used their exact configured argument arrays,
+  positive timeout, exact caller environment, absolute working directory, and
+  cancellation event through the shared no-shell subprocess boundary.
+- Success requires exit zero plus complete stdout and stderr evidence. Non-zero
+  exit, missing executable, timeout, pre-cancellation, cleanup failure metadata,
+  or truncated success remains a typed `passed=false` result for the deployment
+  coordinator; the controller never guesses that an external side effect
+  occurred.
+- The real timeout hook started a parent and descendant, exceeded its one-second
+  bound, and returned only after both processes were gone. The real redaction
+  hook printed a sensitive environment value and retained only `[REDACTED]`;
+  the real oversized-output hook exited zero but was correctly refused as
+  passing because complete evidence was unavailable.
+- Final `.venv/bin/python -m pytest -q` — passed with required loopback and
+  Docker access (`386 passed in 93.89s`), preserving every Milestone 0 through
+  5A gate.
+- `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` — passed (`All
+  checks passed!`; `61 files already formatted`). `.venv/bin/mypy dploydb` and
+  `.venv/bin/mypy demo` passed with no issues in `25` package source files and
+  `6` demo source files.
+
+Slice 5B is complete. Slice 5C is the next allowed work. Hook execution is not
+yet called by any public or production-mutating path.
+
+##### 5C — Docker Compose production application lifecycle
+
+Status on 2026-07-19: `COMPLETE`. This slice owns the production lifecycle
+contracts in `dploydb/runners/base.py`, the new
+`dploydb/runners/docker_compose_production.py`, strict durable production
+application handles, and focused unit plus real-Docker rollback-lifecycle tests.
+It does not run traffic hooks or mutate the production database.
+
+- Add a separate typed production lifecycle rather than weakening candidate
+  isolation: discover/inspect current, stop and prove stopped, start the new
+  release against production, inspect it, collect logs, stop/remove the failed
+  new release, restart the exact previous container, and prove its running state.
+- Validate actual Compose project/service labels, container identity, production
+  database bind, loopback production port, and running/stopped state before a
+  transition is accepted. Production startup must not inject candidate test-mode
+  values.
+- Preserve the exact previous container while starting the new release in a
+  release-derived Compose project. Cleanup targets only recorded container and
+  project identities and is idempotent; ambiguous identity or unproven cleanup
+  becomes `recovery_required`.
+
+Slice 5C gate:
+
+- Unit tests prove exact no-shell command/environment construction, timeouts,
+  inspection rejection, bounded logs, exact-target cleanup, previous-container
+  preservation, restart, idempotency, and secret redaction.
+- A real-Docker lifecycle test stops a healthy v1 container, starts v2 against a
+  disposable production database while v1 remains preserved, removes v2,
+  restarts that exact v1 container, verifies health, and leaves no test release
+  resources behind.
+
+Slice 5C acceptance evidence observed on 2026-07-19:
+
+- `.venv/bin/python -m pytest -q
+  tests/unit/test_docker_compose_production_runner.py` — passed (`19 passed in
+  0.16s`). Coverage proves unique configured-service discovery, exact durable
+  container identity, current-app stop without removal, stopped-state port
+  configuration inspection, release-derived resource names, production database
+  mount/environment injection, loopback production-port validation, DployDB
+  operation/release/role labels, and removal of candidate URL/test-mode values
+  from the production startup environment.
+- Unit fault coverage rejects missing/multiple/unsafe discovery, wrong running
+  state, project/service/release/operation identity, wrong database mount or
+  environment, wildcard/wrong/additional ports, invalid release IDs, startup
+  failure, bounded log truncation, and unproven cleanup. Exact-target cleanup is
+  idempotent and never issues remove/down against the preserved previous
+  container or project.
+- `.venv/bin/python -m pytest -q
+  tests/integration/test_production_runner.py -vv` — passed (`1 passed in
+  3.95s`). The real Docker gate started healthy v1 with a visible SQLite row,
+  discovered its full container identity, stopped but preserved it, migrated the
+  stopped fixture to v2, started and inspected a separate production-release
+  project on the same loopback production port, observed healthy v2, collected
+  complete logs, removed v2 twice idempotently, restored the stopped v1 fixture,
+  restarted the exact original container ID, and proved healthy v1 plus the
+  preserved row.
+- Final `.venv/bin/python -m pytest -q` — passed with required loopback and
+  Docker access (`406 passed in 99.58s`), preserving every Milestone 0 through
+  5B gate.
+- `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` — passed (`All
+  checks passed!`; `64 files already formatted`). `.venv/bin/mypy dploydb` and
+  `.venv/bin/mypy demo` passed with no issues in `26` package source files and
+  `6` demo source files.
+- Final read-only Docker audits found no container labeled
+  `io.dploydb.role=production_release` and no network with the Milestone 5C
+  production-release project prefix.
+
+Slice 5C is complete. Slice 5D is the next allowed work. No final backup,
+production migration, automatic database restore, coordinator, or public deploy
+command exists yet.
+
+##### 5D — Cutover database transaction
+
+Status on 2026-07-19: `COMPLETE`. This slice owns the database mutation and
+rollback primitives in `dploydb/cutover.py`, the caller-owned restore addition
+to `dploydb/restore.py`, reusable migration command evidence, and their focused
+tests. It does not invoke traffic hooks, stop or restart applications itself,
+coordinate a deployment, or expose `dploydb deploy`.
+
+- After caller-supplied proof that every managed database user is stopped,
+  create a `FINAL` backup through the existing online backup API and reverify its
+  checksum/SQLite evidence before migration may start.
+- Run the configured migration directly against production with the rehearsed
+  database environment variable, mandatory timeout, complete redacted command
+  capture, and post-migration SQLite checks. Persist command evidence before
+  accepting `production_migrated`.
+- Extract and test a low-level verified restore transaction that stages the
+  selected final backup, reverifies it, removes only safe SQLite sidecars while
+  users are stopped, atomically replaces and fsyncs production, and verifies the
+  resulting bytes and SQLite contents. The existing restore wrapper continues
+  to provide its own lock, operation, and pre-restore backup behavior.
+- Require an explicit `traffic_activated=false` guard for automatic database
+  restore; the primitive refuses post-traffic rollback.
+
+Slice 5D gate:
+
+- Tests cover final-backup failure, production migration non-zero exit, timeout,
+  cancellation, truncated evidence, post-migration SQLite failure, restore
+  staging/replacement/fsync failures, unsafe sidecars, checksum mismatch, and
+  the post-traffic rollback guard.
+- Forced migration and post-check failures restore the final backup byte for
+  byte when rollback prerequisites hold; a restore that cannot be proven ends
+  `recovery_required` with the application still stopped.
+
+Slice 5D acceptance evidence observed on 2026-07-19:
+
+- `.venv/bin/python -m pytest -q tests/unit/test_cutover.py
+  tests/unit/test_restore.py tests/unit/test_migration.py` — passed (`29 passed
+  in 2.11s`). The cutover tests use real SQLite files and real bounded migration
+  subprocesses. A `FINAL` snapshot is accepted only with complete stopped-app
+  command and inspection proof, is tied to the active operation ID, and is
+  reverified before either migration or rollback.
+- The production migration matrix covers success, a partial migration followed
+  by non-zero exit, a partial migration followed by timeout and process-group
+  cleanup, started cancellation, complete-output truncation, durable evidence
+  persistence failure, unproven process cleanup, and a successful command that
+  leaves a foreign-key violation. Command evidence is emitted before the
+  migration can be accepted, and post-command uncertainty carries conservative
+  `production_changed` and `recovery_required` facts.
+- Each real non-zero, timeout, truncation, and post-SQLite-check failure restored
+  the operation-bound final backup through the caller-owned transaction. The
+  restored production file matched the final SHA-256 byte for byte and returned
+  to `user_version=1`, the original schema, and the original row.
+- Restore fault coverage proves pre-replacement staging and atomic-replacement
+  failures preserve the current database; post-replacement and directory-fsync
+  failures become `recovery_required`; unsafe WAL/SHM entries are refused;
+  tampered final-backup bytes are rejected; and automatic restore after the
+  stored traffic-activation boundary is forbidden without touching production.
+- Final `.venv/bin/python -m pytest -q` — passed with required loopback and
+  Docker access (`422 passed in 99.68s`), preserving every Milestone 0 through
+  5C gate.
+- `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` — passed (`All
+  checks passed!`; `66 files already formatted`). `.venv/bin/mypy dploydb` and
+  `.venv/bin/mypy demo` passed with no issues in `27` package source files and
+  `6` demo source files.
+- `uv lock --check` and `uv sync --locked --check` — passed with `38` resolved
+  and `37` checked packages; the locked environment required no changes.
+
+Slice 5D is complete. Slice 5E is the next allowed work. The safe database
+transaction is not yet reachable from a coordinator or public command, and no
+claim is made yet that application-plus-database rollback is complete.
+
+##### 5E — Deployment coordinator and pre-traffic rollback matrix
+
+Status on 2026-07-19: `COMPLETE`. The internal coordinator, complete injected
+fault matrix, full loopback/Docker regression gate, and static checks pass.
+The public CLI remains absent until slice 5F.
+
+- Compose the existing preflight, verified rehearsal snapshot, migration
+  rehearsal, candidate validation, traffic controller, production runner,
+  final-backup/migration transaction, health checker, release store, and state
+  store under one lock and operation.
+- Follow the required order exactly: candidate cleanup; maintenance on; current
+  application stop proof; final verified backup; production migration; new
+  application start/inspection; final database, HTTP, and optional smoke checks;
+  traffic activation; maintenance off; then durable `active`.
+- Before traffic activation, a failure enters `rollback_started`, stops the new
+  application if present, restores the final backup only if production may have
+  changed, restarts the exact previous container, activates the old target,
+  disables maintenance, checks the previous application/database, and reaches
+  `rolled_back` only when every proof passes. A failure before production
+  mutation still restores application/maintenance state without needlessly
+  replacing the database.
+- Any contradictory stage, unproven application state, failed database restore,
+  failed old-target activation, failed maintenance cleanup, or unhealthy
+  previous application ends `recovery_required` with exact manual instructions.
+  After `traffic_activated`, never restore the old database automatically; keep
+  the checked new application/database and escalate the remaining traffic or
+  maintenance action.
+
+Slice 5E gate:
+
+- An injected failure at every cutover call boundary has a stable expected
+  state and safety payload. Repeated cleanup is idempotent.
+- Forced production-migration and final-health failures restore the final backup
+  checksum/schema/rows, restart the exact previous application, reactivate its
+  target, disable maintenance, pass previous health, and finish `rolled_back`.
+- Traffic activation and post-activation maintenance failures obey the stored
+  traffic fact and never perform an unsafe automatic database rollback.
+- Every release manifest and operation event explains what ran, what changed,
+  what was restored, which application is running, and the next safe action;
+  cross-sink secret scans pass.
+
+Slice 5E acceptance evidence observed on 2026-07-19:
+
+- `dploydb/deploy.py` now composes the existing caller-owned candidate stage,
+  exact production runner, command traffic controller, final-backup/migration
+  transaction, application health checker, release store, operation store, and
+  kernel-backed lock. Narrow injectable adapters live in
+  `dploydb/deployment_dependencies.py`, and compact release/full-event evidence
+  conversion lives in `dploydb/deployment_evidence.py`. The coordinator persists
+  every required state from `created` through `active`, or through
+  `rollback_started` to `rolled_back`/`recovery_required`.
+- The coordinator stores the traffic point of no return in memory immediately
+  after a passing activation hook and durably before continuing. A failed
+  activation that may have run and every post-activation failure preserve the
+  checked new database/application and forbid automatic database rollback.
+  Only a start-failed or pre-start-cancelled activation has sufficient evidence
+  to enter pre-traffic rollback.
+- `.venv/bin/python -m pytest -q tests/unit/test_deploy.py` — passed (`23 passed
+  in 1.71s`). The matrix covers a
+  successful deployment, exact active-release reuse, candidate rejection,
+  maintenance enable/cleanup, current stop, final backup, migration, new-app
+  start/log/health, activation, post-activation maintenance, new-app cleanup,
+  verified database restore, previous restart, old-target activation,
+  maintenance cleanup, previous health, durable release-sink failure, and
+  cross-sink secret redaction.
+- Forced production-migration and final-health failures restored the recorded
+  final backup to the original schema, `user_version=1`, and row set; removed a
+  started new release when applicable; restarted the exact previous handle;
+  activated the old target; disabled maintenance; passed previous SQLite and
+  application health; and ended with release `rolled_back` plus operation
+  `failed_safe` evidence.
+- `.venv/bin/python -m pytest -q tests/unit/test_deploy.py
+  tests/unit/test_candidate.py tests/unit/test_releases.py
+  tests/unit/test_cutover.py tests/unit/test_traffic.py
+  tests/unit/test_docker_compose_production_runner.py
+  tests/fault_injection/test_release_state_interruption.py` — passed (`88 passed
+  in 5.39s`).
+- `.venv/bin/python -m pytest -q tests --ignore=tests/integration
+  --ignore=tests/unit/test_health.py --ignore=tests/unit/test_diagnostics.py` —
+  passed (`386 passed in 8.19s`). The omitted files are the known tests that
+  require loopback sockets or Docker, not selected test failures.
+- `.venv/bin/ruff check .`, `.venv/bin/ruff format --check .`, `git diff
+  --check`, `.venv/bin/mypy dploydb`, and `.venv/bin/mypy demo` passed (`70`
+  files formatted; no type errors in `30` package and `6` demo source files).
+- Final `.venv/bin/python -m pytest -q` — passed with required loopback and
+  Docker access (`445 passed in 100.26s`), preserving every Milestone 0 through
+  5D gate while exercising the new coordinator and rollback matrix.
+
+Slice 5E is complete. Slice 5F is the next allowed work. No public deployment
+command is exposed until the real-Docker success and rollback flows below pass.
+
+##### 5F — Public deploy CLI and final Milestone 5 gate
+
+Status on 2026-07-19: `COMPLETE`. The public command, stable output contracts,
+three real-Docker flows, continuous traffic-isolation proof, complete regression
+suite, packaging/install checks, documentation, and final Docker audit pass.
+
+- Add `dploydb deploy --version <version> [--json] [--non-interactive]` only
+  after 5E passes. Render successful active and rolled-back outcomes plus all
+  expected failures with stable machine-readable fields and no traceback.
+- Run the deterministic real-Docker flows for successful v2, forced
+  production-migration failure, and forced final-health failure. Use real
+  SQLite rows/schema/checksums, real containers, real HTTP checks, and real
+  command hooks; mocks remain limited to unit fault injection.
+- Monitor the traffic-visible endpoint through cutover and prove the new release
+  receives no normal request before final health passes and activation succeeds.
+
+Final Milestone 5 gate:
+
+- A successful release changes the expected application and schema, preserves
+  existing rows, leaves a verified final backup, records the active release, and
+  keeps the previous application/backup recoverable.
+- Forced production-migration and final-health failures restore both database
+  and application and leave the previous release healthy; final manifests and
+  event logs contain the complete redacted trail.
+- Focused tests, full `pytest`, Ruff check, Ruff format check, mypy for package
+  and demo, build, isolated `pipx` verification, CLI help/JSON checks, a direct
+  real-demo deployment flow, and final Docker resource audits all pass before
+  Milestone 5 is marked complete.
+
+Slice 5F and final Milestone 5 acceptance evidence observed on 2026-07-19:
+
+- `dploydb deploy --version <version> [--json] [--non-interactive]` is public.
+  Active and rolled-back terminal results share stable release/operation IDs,
+  requested version, production/application/recovery facts, traffic activation,
+  final backup ID/checksum, log path, and non-interactive mode. Expected
+  `recovery_required` failures reuse the stable failure payload and exit `60`;
+  rolled-back results preserve the original stable failure class, such as exit
+  `40` for a production migration command failure and `50` for failed final
+  health.
+- `.venv/bin/python -m pytest -q tests/unit/test_deploy_cli.py
+  tests/test_cli.py` — passed (`18 passed in 0.26s`). Coverage proves human and
+  JSON active/rolled-back output, recovery-required JSON, required `--version`,
+  stable exits, and that `--non-interactive` performs no terminal read.
+- The deterministic demo gained a production-only health-failure fixture that
+  passes the real isolated candidate under `DPLOYDB_TEST_MODE=1` and returns
+  HTTP `503 fixture_final_production_health_failure` only in production. A
+  separate real migration fault command commits a partial schema mutation only
+  when its database target is the configured production file; rehearsal still
+  runs the normal v2 migration. These fixtures reach the intended late cutover
+  boundaries without mocking Docker, SQLite, hooks, subprocesses, or HTTP.
+- `.venv/bin/python -m pytest -q tests/integration/test_deploy_end_to_end.py` —
+  passed (`3 passed in 34.44s`). The public executable completed a healthy v2
+  deployment, rolled back a partial production-migration failure, and rolled
+  back a final-production-health failure after candidate health passed. Both
+  failures restored `user_version=1`, the exact v1 columns and row set, restarted
+  healthy v1, activated the old target, disabled maintenance, retained final
+  backup evidence, and ended `rolled_back` without recovery uncertainty.
+- A continuous real HTTP client sent normal `GET /notes` traffic through an
+  atomic traffic-state proxy during each cutover. It observed old responses
+  before maintenance, only maintenance responses while production was stopped,
+  and no new-schema response unless the stored target was `new` and maintenance
+  was already off. The successful path recorded exactly maintenance-on,
+  activate-new, maintenance-off; rollback paths recorded maintenance-on,
+  activate-old, maintenance-off.
+- Final `.venv/bin/python -m pytest -q` passed with required loopback and Docker
+  access (`456 passed in 144.01s`), including every Milestone 0 through 5 gate.
+  `.venv/bin/ruff check .`, `.venv/bin/ruff format --check .`, `git diff
+  --check`, `.venv/bin/mypy dploydb`, and `.venv/bin/mypy demo` passed (`74`
+  files formatted; no type errors in `30` package and `8` demo source files).
+- `uv lock --check` and `uv sync --locked --check` passed with `38` resolved and
+  `37` checked packages and no changes. `uv build` rebuilt the sdist and wheel;
+  wheel inspection found the CLI, coordinator, dependency/evidence adapters,
+  cutover, traffic, and release modules. `uv run python
+  scripts/verify_pipx_install.py` passed in a fresh temporary isolated install.
+- `.venv/bin/dploydb --help`, `.venv/bin/dploydb deploy --help`, console and
+  module version commands passed. Deploy help exposes required `--version` plus
+  `--json` and `--non-interactive`; a missing-config JSON probe exited `10` with
+  the complete stable redacted failure payload and no traceback. `README.md`
+  now documents the public cutover, automatic pre-traffic rollback, and the
+  post-activation no-database-rollback boundary.
+- Final read-only Docker audits returned no container labeled
+  `io.dploydb.role=candidate` or `io.dploydb.role=production_release` and no
+  DployDB network. The end-to-end gate also performed exact project-token
+  cleanup and asserted no matching container remained after every scenario.
+
+Milestone 5 is complete. Milestone 6 is the next allowed work; public release
+history/details, manual restore with backup-first warning, and crash recovery
+remain intentionally unclaimed.
 
 ---
 

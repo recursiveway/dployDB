@@ -21,6 +21,7 @@ from dploydb.config import (
     initialize_configuration,
     load_configuration,
     parse_configuration,
+    require_deploy_topology,
     resolve_configuration,
 )
 from dploydb.errors import ConfigurationError, ExitCode
@@ -78,10 +79,14 @@ def test_starter_configuration_is_strictly_valid() -> None:
     assert resolved.state_directory == Path("/srv/example/.dploydb")
     assert resolved.database.path == Path("/srv/example/data/app.db")
     assert resolved.migration.command == ("python", "scripts/migrate.py")
+    assert resolved.application.production_project == "example-app"
+    assert resolved.application.production_port == 4510
+    assert resolved.application.production_health_url == "http://127.0.0.1:4510/health"
     assert resolved.application.candidate_container_port == 8080
     assert resolved.application.database_volume_target == "/data"
     assert resolved.application.smoke_command == ("python", "scripts/smoke_test.py")
     assert resolved.application.test_mode_env == {"DPLOYDB_TEST_MODE": "1"}
+    assert resolved.traffic.timeout_seconds == 30
     assert resolved.backup.remote is not None
     assert resolved.backup.remote.enabled is False
 
@@ -105,6 +110,23 @@ def test_starter_configuration_is_strictly_valid() -> None:
         (("application", "runner"), "custom", "docker_compose"),
         (("application", "compose_file"), "compose.yaml", "absolute path"),
         (("application", "service"), " ", "must not be empty"),
+        (("application", "production_project"), "bad project!", "Compose service name"),
+        (("application", "production_port"), 0, "greater than or equal to 1"),
+        (
+            ("application", "production_health_url"),
+            "https://127.0.0.1:4510/health",
+            "must use http",
+        ),
+        (
+            ("application", "production_health_url"),
+            "http://example.com:4510/health",
+            "loopback host",
+        ),
+        (
+            ("application", "production_health_url"),
+            "http://127.0.0.1:9999/health",
+            "port must match",
+        ),
         (("application", "candidate_port"), 0, "greater than or equal to 1"),
         (("application", "candidate_port"), 65536, "less than or equal to 65535"),
         (("application", "candidate_port"), "4511", "valid integer"),
@@ -153,6 +175,7 @@ def test_starter_configuration_is_strictly_valid() -> None:
         ),
         (("traffic", "maintenance_on_command"), [], "at least one argument"),
         (("traffic", "activate_new_command"), "activate candidate", "argument array"),
+        (("traffic", "timeout_seconds"), 0, "greater than 0"),
         (("backup", "local_directory"), "backups", "absolute path"),
         (("backup", "keep_last"), 0, "greater than 0"),
         (("backup", "keep_last"), "10", "valid integer"),
@@ -280,6 +303,71 @@ def test_candidate_container_settings_have_backward_compatible_defaults() -> Non
 
     assert config.application.candidate_container_port == 8080
     assert config.application.database_volume_target == "/data"
+
+
+def test_pre_milestone5_configuration_parses_but_deploy_topology_is_required() -> None:
+    value = valid_mapping()
+    for field in ("production_project", "production_port", "production_health_url"):
+        remove_field(value, ("application", field))
+    remove_field(value, ("traffic", "timeout_seconds"))
+
+    config = parse_configuration(render(value))
+
+    assert config.application.production_project is None
+    assert config.application.production_port is None
+    assert config.application.production_health_url is None
+    assert config.traffic.timeout_seconds == 30
+    with pytest.raises(ConfigurationError, match="deployment requires") as captured:
+        require_deploy_topology(config)
+    assert captured.value.payload.production_changed is False
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ("production_project", "production_port", "production_health_url"),
+)
+def test_partial_production_topology_is_rejected(missing: str) -> None:
+    value = valid_mapping()
+    remove_field(value, ("application", missing))
+
+    error = assert_configuration_error(render(value))
+
+    assert "must be configured together" in error.payload.what_failed
+
+
+def test_candidate_and_production_ports_must_be_distinct() -> None:
+    value = valid_mapping()
+    nested_set(value, ("application", "production_port"), 4511)
+    nested_set(
+        value,
+        ("application", "production_health_url"),
+        "http://127.0.0.1:4511/health",
+    )
+
+    error = assert_configuration_error(render(value))
+
+    assert "production_port must differ from candidate_port" in error.payload.what_failed
+
+
+def test_complete_deploy_topology_is_returned_without_operational_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = parse_configuration(STARTER_CONFIGURATION)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("deploy topology validation performed operational access")
+
+    monkeypatch.setattr(Path, "exists", forbidden)
+    monkeypatch.setattr(Path, "is_file", forbidden)
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(socket, "socket", forbidden)
+
+    topology = require_deploy_topology(config)
+
+    assert topology.compose_project == "example-app"
+    assert topology.host_port == 4510
+    assert topology.health_url == "http://127.0.0.1:4510/health"
 
 
 def test_database_path_environment_cannot_override_reserved_candidate_version() -> None:

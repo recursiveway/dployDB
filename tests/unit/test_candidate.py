@@ -11,12 +11,18 @@ from typing import Any
 import pytest
 import yaml
 
-from dploydb.candidate import validate_configured_candidate
-from dploydb.config import STARTER_CONFIGURATION, LoadedConfiguration, load_configuration
+from dploydb.candidate import run_candidate_stage, validate_configured_candidate
+from dploydb.config import (
+    STARTER_CONFIGURATION,
+    LoadedConfiguration,
+    configuration_fingerprint,
+    load_configuration,
+)
 from dploydb.errors import (
     ExternalCommandError,
     OperationFailedError,
     RecoveryRequiredError,
+    SafetyCheckError,
 )
 from dploydb.health import (
     BoundedResponseEvidence,
@@ -27,6 +33,7 @@ from dploydb.health import (
     ReadinessEvidence,
     SmokeCheckError,
 )
+from dploydb.locking import DeploymentLock
 from dploydb.models import OperationStatus
 from dploydb.runners.base import (
     CandidateCleanup,
@@ -323,6 +330,84 @@ def test_success_is_durable_only_after_candidate_and_workspace_cleanup(tmp_path:
     assert events[-2].evidence["candidate_cleanup"]["proof"]["proven"] is True
     assert events[-1].evidence["rehearsal_workspace_cleaned"] is True
     assert_workspace_clean(loaded)
+
+
+def test_caller_owned_candidate_stage_remains_in_progress_for_cutover(tmp_path: Path) -> None:
+    config_path, loaded = configured(tmp_path)
+    before = production_sha(loaded)
+    store = StateStore(loaded.config.state_directory, secrets=loaded.secrets)
+    lock = DeploymentLock(loaded.config.state_directory, secrets=loaded.secrets)
+
+    with lock:
+        operation = store.create_operation(
+            operation_type="deploy",
+            project=loaded.config.project,
+            configuration_fingerprint=configuration_fingerprint(
+                loaded.config,
+                secrets=loaded.secrets,
+            ),
+            evidence={"requested_version": "v2"},
+        )
+        lock.record_owner(operation_id=operation.operation_id, operation_type="deploy")
+
+        result = run_candidate_stage(
+            loaded,
+            version="v2",
+            config_path=config_path,
+            operation_id=operation.operation_id,
+            store=store,
+            lock=lock,
+            command_environment=os.environ,
+            application_runner=FakeRunner(),
+            health_checker=FakeHealth(),
+        )
+
+        current = store.read_manifest(operation.operation_id)
+        assert result.operation_id == operation.operation_id
+        assert current.status is OperationStatus.IN_PROGRESS
+        assert current.stage == "candidate_healthy"
+        assert current.safety.production_changed is False
+        assert lock.acquired is True
+        store.transition(
+            operation.operation_id,
+            status=OperationStatus.SUCCEEDED,
+            stage="candidate_stage_test_complete",
+            message="Test caller completed without entering cutover.",
+        )
+
+    assert production_sha(loaded) == before
+    assert_workspace_clean(loaded)
+
+
+def test_caller_owned_candidate_stage_requires_matching_recorded_lock_owner(
+    tmp_path: Path,
+) -> None:
+    config_path, loaded = configured(tmp_path)
+    store = StateStore(loaded.config.state_directory, secrets=loaded.secrets)
+    lock = DeploymentLock(loaded.config.state_directory, secrets=loaded.secrets)
+
+    with lock:
+        operation = store.create_operation(
+            operation_type="deploy",
+            project=loaded.config.project,
+            configuration_fingerprint=configuration_fingerprint(
+                loaded.config,
+                secrets=loaded.secrets,
+            ),
+        )
+        with pytest.raises(SafetyCheckError, match="matching durable deployment lock owner"):
+            run_candidate_stage(
+                loaded,
+                version="v2",
+                config_path=config_path,
+                operation_id=operation.operation_id,
+                store=store,
+                lock=lock,
+                application_runner=FakeRunner(),
+                health_checker=FakeHealth(),
+            )
+
+    assert store.read_manifest(operation.operation_id).stage == "created"
 
 
 @pytest.mark.parametrize(

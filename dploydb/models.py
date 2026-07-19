@@ -363,6 +363,264 @@ class RestoreResult(DurableModel):
         return serialize_utc_timestamp(value)
 
 
+class ProductionApplicationHandle(DurableModel):
+    """Exact Docker application identity preserved across cutover and rollback."""
+
+    source: Literal["bootstrap", "release"]
+    container_id: str = Field(pattern=r"^[0-9a-f]{12,64}$")
+    container_name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$")
+    compose_project: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    compose_service: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+    version: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+    )
+    release_id: str | None = Field(default=None, pattern=r"^release_[0-9a-f]{32}$")
+    operation_id: str | None = Field(default=None, pattern=r"^op_[0-9a-f]{32}$")
+    database_directory: Path
+    database_target: str = Field(pattern=r"^/[^\x00:]+$")
+    host_port: int = Field(ge=1, le=65535)
+    container_port: int = Field(ge=1, le=65535)
+    health_url: str = Field(min_length=1, max_length=4096)
+
+    @field_validator("database_directory")
+    @classmethod
+    def validate_database_directory(cls, value: Path) -> Path:
+        if not value.is_absolute() or value == Path("/"):
+            raise ValueError("database directory must be an absolute non-root path")
+        return value
+
+    @model_validator(mode="after")
+    def validate_source_identity(self) -> Self:
+        if self.source == "release":
+            if self.version is None or self.release_id is None or self.operation_id is None:
+                raise ValueError(
+                    "release application handle requires version, release_id, and operation_id"
+                )
+        elif self.release_id is not None or self.operation_id is not None:
+            raise ValueError(
+                "bootstrap application handle must not claim a release_id or operation_id"
+            )
+        return self
+
+
+class ReleaseHookEvidence(DurableModel):
+    """Bounded hook summary kept with the release; full capture stays in events."""
+
+    action: Literal[
+        "enable_maintenance",
+        "disable_maintenance",
+        "activate_new",
+        "activate_old",
+    ]
+    passed: bool
+    outcome: Literal[
+        "succeeded",
+        "nonzero_exit",
+        "start_failed",
+        "timed_out",
+        "cancelled",
+        "cleanup_failed",
+    ]
+    exit_code: int | None
+    output_complete: bool
+    duration_seconds: float = Field(ge=0)
+    termination_reason: Literal["timeout", "cancellation", "interruption"] | None = None
+    forced_kill: bool = False
+    cleanup_error: str | None = Field(default=None, max_length=4096)
+
+
+class ReleaseHealthEvidence(DurableModel):
+    """Passing new or previous application health summary for one release."""
+
+    role: Literal["new", "previous"]
+    version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    url: str = Field(min_length=1, max_length=4096)
+    readiness_attempts: int = Field(gt=0)
+    smoke_outcome: Literal["succeeded"] | None = None
+
+
+class ReleaseManifest(DurableModel):
+    """Atomic durable summary of one deployment release and its safety facts."""
+
+    schema_version: Literal[1] = 1
+    release_id: str = Field(pattern=r"^release_[0-9a-f]{32}$")
+    operation_id: str = Field(pattern=r"^op_[0-9a-f]{32}$")
+    project: str = Field(min_length=1, max_length=64)
+    requested_version: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    status: DeploymentState
+    configuration_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    operation_log_path: Path
+    previous_release_id: str | None = Field(default=None, pattern=r"^release_[0-9a-f]{32}$")
+    previous_application: ProductionApplicationHandle | None = None
+    new_application: ProductionApplicationHandle | None = None
+    rehearsal_backup_id: str | None = Field(default=None, pattern=r"^backup_[0-9a-f]{32}$")
+    rehearsal_backup_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    final_backup_id: str | None = Field(default=None, pattern=r"^backup_[0-9a-f]{32}$")
+    final_backup_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    production_health_passed: bool = False
+    production_changed: bool = False
+    traffic_activated: bool = False
+    traffic_hooks: tuple[ReleaseHookEvidence, ...] = ()
+    health_checks: tuple[ReleaseHealthEvidence, ...] = ()
+    started_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
+    failure: FailureRecord | None = None
+
+    @field_validator("operation_log_path")
+    @classmethod
+    def validate_operation_log_path(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("operation log path must be absolute")
+        return value
+
+    @field_validator("started_at", "updated_at", "completed_at")
+    @classmethod
+    def normalize_release_timestamp(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @field_serializer("started_at", "updated_at", "completed_at")
+    def serialize_release_timestamp(self, value: datetime | None) -> str | None:
+        return None if value is None else serialize_utc_timestamp(value)
+
+    @model_validator(mode="after")
+    def validate_release_lifecycle(self) -> Self:
+        if self.updated_at < self.started_at:
+            raise ValueError("updated_at must not precede started_at")
+        if (self.rehearsal_backup_id is None) != (self.rehearsal_backup_sha256 is None):
+            raise ValueError("rehearsal backup ID and checksum must be recorded together")
+        if (self.final_backup_id is None) != (self.final_backup_sha256 is None):
+            raise ValueError("final backup ID and checksum must be recorded together")
+
+        terminal = self.status in {
+            DeploymentState.ACTIVE,
+            DeploymentState.ROLLED_BACK,
+            DeploymentState.FAILED_SAFE,
+            DeploymentState.RECOVERY_REQUIRED,
+        }
+        if terminal != (self.completed_at is not None):
+            raise ValueError("terminal release state and completed_at must agree")
+        if self.completed_at is not None and self.completed_at != self.updated_at:
+            raise ValueError("completed_at must equal updated_at for a terminal release")
+
+        failed = self.status in {
+            DeploymentState.ROLLED_BACK,
+            DeploymentState.FAILED_SAFE,
+            DeploymentState.RECOVERY_REQUIRED,
+        }
+        if failed != (self.failure is not None):
+            raise ValueError("failure details must be present exactly for non-active terminals")
+
+        if self.status in {
+            DeploymentState.MANUAL_RESTORE_STARTED,
+            DeploymentState.MANUAL_RESTORE_COMPLETED,
+        }:
+            raise ValueError("manual restore states do not belong to a deployment release")
+        if self.previous_release_id is not None and self.previous_application is not None:
+            if self.previous_application.release_id != self.previous_release_id:
+                raise ValueError("previous release and application identities contradict")
+        if self.new_application is not None and (
+            self.new_application.release_id != self.release_id
+            or self.new_application.version != self.requested_version
+            or self.new_application.operation_id != self.operation_id
+        ):
+            raise ValueError("new application identity contradicts the release manifest")
+        rehearsal_required = self.status in {
+            DeploymentState.SNAPSHOT_VERIFIED,
+            DeploymentState.REHEARSAL_PASSED,
+            DeploymentState.CANDIDATE_HEALTHY,
+            DeploymentState.MAINTENANCE_ENABLED,
+            DeploymentState.CURRENT_APP_STOPPED,
+            DeploymentState.FINAL_SNAPSHOT_VERIFIED,
+            DeploymentState.PRODUCTION_MIGRATED,
+            DeploymentState.NEW_APP_HEALTHY,
+            DeploymentState.TRAFFIC_ACTIVATED,
+            DeploymentState.ACTIVE,
+            DeploymentState.ROLLBACK_STARTED,
+            DeploymentState.ROLLED_BACK,
+        }
+        if rehearsal_required and self.rehearsal_backup_id is None:
+            raise ValueError("release state requires verified rehearsal backup evidence")
+        previous_required = self.status in {
+            DeploymentState.CURRENT_APP_STOPPED,
+            DeploymentState.FINAL_SNAPSHOT_VERIFIED,
+            DeploymentState.PRODUCTION_MIGRATED,
+            DeploymentState.NEW_APP_HEALTHY,
+            DeploymentState.TRAFFIC_ACTIVATED,
+            DeploymentState.ACTIVE,
+            DeploymentState.ROLLBACK_STARTED,
+            DeploymentState.ROLLED_BACK,
+        }
+        if previous_required and self.previous_application is None:
+            raise ValueError("release state requires the exact previous application identity")
+        if self.traffic_activated and self.status not in {
+            DeploymentState.TRAFFIC_ACTIVATED,
+            DeploymentState.ACTIVE,
+            DeploymentState.RECOVERY_REQUIRED,
+        }:
+            raise ValueError("traffic activation fact contradicts the release state")
+        if self.traffic_activated and not self.production_changed:
+            raise ValueError("activated traffic requires a changed production release")
+        if self.status is DeploymentState.FAILED_SAFE and (
+            self.production_changed or self.traffic_activated
+        ):
+            raise ValueError("failed_safe release must leave production unchanged")
+        if self.status is DeploymentState.ROLLED_BACK and self.traffic_activated:
+            raise ValueError("rolled_back release cannot have activated new traffic")
+
+        if self.status in {
+            DeploymentState.PRODUCTION_MIGRATED,
+            DeploymentState.NEW_APP_HEALTHY,
+            DeploymentState.TRAFFIC_ACTIVATED,
+            DeploymentState.ACTIVE,
+        } and (self.final_backup_id is None or not self.production_changed):
+            raise ValueError("production mutation requires the verified final backup")
+        if self.status in {
+            DeploymentState.NEW_APP_HEALTHY,
+            DeploymentState.TRAFFIC_ACTIVATED,
+            DeploymentState.ACTIVE,
+        } and (self.new_application is None or not self.production_health_passed):
+            raise ValueError("healthy new-application evidence is required")
+        if self.status in {DeploymentState.TRAFFIC_ACTIVATED, DeploymentState.ACTIVE} and not (
+            self.traffic_activated
+        ):
+            raise ValueError("traffic-activated state requires the stored traffic fact")
+        if self.status is DeploymentState.ACTIVE and self.previous_application is None:
+            raise ValueError("active release must preserve the previous application identity")
+        return self
+
+
+class ReleasePointers(DurableModel):
+    """Atomic selection of the active and immediately previous release manifests."""
+
+    schema_version: Literal[1] = 1
+    active_release_id: str = Field(pattern=r"^release_[0-9a-f]{32}$")
+    previous_release_id: str | None = Field(default=None, pattern=r"^release_[0-9a-f]{32}$")
+    updated_at: datetime
+
+    @field_validator("updated_at")
+    @classmethod
+    def normalize_pointer_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @field_serializer("updated_at")
+    def serialize_pointer_timestamp(self, value: datetime) -> str:
+        return serialize_utc_timestamp(value)
+
+    @model_validator(mode="after")
+    def validate_pointer_identity(self) -> Self:
+        if self.previous_release_id == self.active_release_id:
+            raise ValueError("active and previous release IDs must differ")
+        return self
+
+
 class CapturedCommandOutput(DurableModel):
     """One complete bounded and redacted subprocess stream."""
 
@@ -429,6 +687,57 @@ class MigrationRehearsalResult(DurableModel):
         return serialize_utc_timestamp(value)
 
 
+class ProductionMigrationResult(DurableModel):
+    """Checked evidence produced after running the rehearsed command on production."""
+
+    operation_id: str = Field(pattern=r"^op_[0-9a-f]{32}$")
+    final_backup_id: str = Field(pattern=r"^backup_[0-9a-f]{32}$")
+    final_backup_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    command: MigrationCommandEvidence
+    sqlite: SQLiteVerification
+    completed_at: datetime
+
+    @field_validator("completed_at")
+    @classmethod
+    def normalize_production_migration_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @field_serializer("completed_at")
+    def serialize_production_migration_time(self, value: datetime) -> str:
+        return serialize_utc_timestamp(value)
+
+
+class VerifiedDatabaseRestoreResult(DurableModel):
+    """Evidence that one verified backup now exactly occupies production."""
+
+    backup_id: str = Field(pattern=r"^backup_[0-9a-f]{32}$")
+    database_path: Path
+    size_bytes: int = Field(gt=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sqlite: SQLiteVerification
+    restored_at: datetime
+
+    @field_validator("database_path")
+    @classmethod
+    def validate_verified_restore_path(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("restored database path must be absolute")
+        return value
+
+    @field_validator("restored_at")
+    @classmethod
+    def normalize_verified_restore_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+        return value.astimezone(UTC)
+
+    @field_serializer("restored_at")
+    def serialize_verified_restore_time(self, value: datetime) -> str:
+        return serialize_utc_timestamp(value)
+
+
 class FailureData(TypedDict):
     """Stable JSON-compatible failure shape used by human and CI output."""
 
@@ -489,6 +798,11 @@ def new_operation_id() -> OperationId:
 def new_backup_id() -> str:
     """Create an opaque identifier for one immutable backup artifact."""
     return f"backup_{uuid4().hex}"
+
+
+def new_release_id() -> str:
+    """Create an opaque identifier for one durable deployment release."""
+    return f"release_{uuid4().hex}"
 
 
 def utc_now() -> datetime:

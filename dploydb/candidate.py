@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +17,7 @@ from dploydb.errors import (
     ExternalCommandError,
     OperationFailedError,
     RecoveryRequiredError,
+    SafetyCheckError,
 )
 from dploydb.health import (
     CandidateHealthChecker,
@@ -35,6 +36,7 @@ from dploydb.migration import (
 )
 from dploydb.models import (
     BackupPurpose,
+    DeploymentState,
     FailureRecord,
     MigrationCommandEvidence,
     MigrationRehearsalResult,
@@ -73,6 +75,12 @@ class HealthChecker(Protocol):
         rehearsal_database_path: Path,
         cancellation_event: threading.Event | None = None,
     ) -> CandidateHealthResult: ...
+
+
+CandidateStageObserver = Callable[
+    [DeploymentState, Mapping[str, JsonValue]],
+    None,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,13 +131,6 @@ def validate_configured_candidate(
     secrets = loaded.secrets
     store = StateStore(config.state_directory, secrets=secrets)
     lock = DeploymentLock(config.state_directory, secrets=secrets)
-    environment = dict(os.environ if command_environment is None else command_environment)
-    working_directory = config_path.resolve().parent
-    runner = command_runner or SubprocessRunner(
-        secrets=secrets,
-        max_output_bytes=MIGRATION_MAX_OUTPUT_BYTES,
-    )
-    owned_health: CandidateHealthChecker | None = None
 
     with lock:
         require_clean_operation_state(lock, store)
@@ -146,151 +147,26 @@ def validate_configured_candidate(
             operation_id=operation.operation_id,
             operation_type="candidate_validation",
         )
-        operation_log = store.operation_paths(operation.operation_id).events
         try:
-            preflight = verify_sqlite_database(config.database.path)
-            store.transition(
-                operation.operation_id,
-                status=OperationStatus.IN_PROGRESS,
-                stage="preflight_passed",
-                message="Production SQLite preflight passed without mutation.",
-                evidence=preflight.model_dump(mode="json"),
-            )
-            snapshot = create_verified_backup(
-                config.database.path,
-                project=secrets.redact_text(config.project),
-                purpose=BackupPurpose.REHEARSAL,
-                storage=LocalBackupStorage(config.backup.local_directory),
-                operation_id=operation.operation_id,
-                metadata_source_path=_safe_metadata_path(config.database.path, loaded),
-            )
-            store.transition(
-                operation.operation_id,
-                status=OperationStatus.IN_PROGRESS,
-                stage="snapshot_verified",
-                message="Verified candidate rehearsal snapshot completed.",
-                evidence={
-                    "backup_id": snapshot.metadata.backup_id,
-                    "backup_path": str(snapshot.database_path),
-                    "sha256": snapshot.metadata.sha256,
-                    "size_bytes": snapshot.metadata.size_bytes,
-                },
-            )
-
-            def record_migration_command(evidence: MigrationCommandEvidence) -> None:
-                store.append_event(
-                    operation.operation_id,
-                    message="Candidate migration command reached a terminal outcome.",
-                    evidence={"migration_command": evidence.model_dump(mode="json")},
-                )
-
-            selected_runner = application_runner or DockerComposeCandidateRunner(
-                project=config.project,
-                application=config.application,
-                database_environment_name=config.database.path_env,
-                production_database_path=config.database.path,
-                secrets=secrets,
-                working_directory=working_directory,
-                command_environment=environment,
-                command_runner=runner,
-            )
-            selected_health = health_checker
-            if selected_health is None:
-                owned_health = CandidateHealthChecker(
-                    application=config.application,
-                    database_environment_name=config.database.path_env,
-                    secrets=secrets,
-                    working_directory=working_directory,
-                    command_environment=environment,
-                    command_runner=runner,
-                )
-                selected_health = owned_health
-
-            with migration_rehearsal(
-                snapshot,
-                operation_id=operation.operation_id,
-                command=config.migration.command,
-                database_environment_name=config.database.path_env,
-                timeout_seconds=config.migration.timeout_seconds,
-                workspace_root=config.state_directory / WORKSPACE_DIRECTORY_NAME,
-                working_directory=working_directory,
-                environment=environment,
-                runner=runner,
-                command_evidence_sink=record_migration_command,
-                cancellation_event=cancellation_event,
-                log_path=operation_log,
-            ) as active:
-                store.transition(
-                    operation.operation_id,
-                    status=OperationStatus.IN_PROGRESS,
-                    stage="rehearsal_passed",
-                    message="Migration rehearsal passed; candidate validation may begin.",
-                    evidence=_rehearsal_summary(active.result),
-                )
-                runtime = _validate_runtime(
-                    runner=selected_runner,
-                    health_checker=selected_health,
-                    active=active,
-                    operation_id=operation.operation_id,
-                    version=release,
-                    store=store,
-                    operation_log=operation_log,
-                    cancellation_event=cancellation_event,
-                )
-                if owned_health is not None:
-                    owned_health.close()
-                    owned_health = None
-
-            result = CandidateValidationResult(
-                operation_id=operation.operation_id,
+            return run_candidate_stage(
+                loaded,
                 version=release,
-                rehearsal=active.result,
-                health=runtime.health,
-                logs=runtime.logs,
-                cleanup=runtime.cleanup,
-                completed_at=utc_now(),
+                config_path=config_path,
+                operation_id=operation.operation_id,
+                store=store,
+                lock=lock,
+                command_environment=command_environment,
+                command_runner=command_runner,
+                application_runner=application_runner,
+                health_checker=health_checker,
+                cancellation_event=cancellation_event,
+                complete_operation=True,
             )
-            store.transition(
-                operation.operation_id,
-                status=OperationStatus.SUCCEEDED,
-                stage="candidate_healthy",
-                message=(
-                    "Candidate checks and candidate/rehearsal cleanup completed successfully."
-                ),
-                evidence={
-                    **_rehearsal_summary(result.rehearsal),
-                    "requested_version": release,
-                    "readiness_attempts": result.health.readiness.attempt_count,
-                    "smoke_outcome": (
-                        None if result.health.smoke is None else result.health.smoke.outcome.value
-                    ),
-                    "candidate_cleanup_proven": result.cleanup.proof.proven,
-                    "rehearsal_workspace_cleaned": True,
-                },
-                safety=SafetyFacts(
-                    production_changed=False,
-                    previous_application_running=None,
-                    recovery_required=False,
-                ),
-            )
-            return result
-        except MigrationWorkspaceCleanupError as error:
-            failure = RecoveryRequiredError(
-                error.payload.what_failed,
-                production_changed=False,
-                previous_application_running=None,
-                log_path=operation_log,
-                next_safe_action=(
-                    "Production was not changed. Preserve the operation evidence and remove "
-                    "only the recorded private rehearsal workspace before recovery."
-                ),
-            )
-            _finish_failure(store, operation.operation_id, failure)
-            raise failure from None
         except DployDBError as error:
             _finish_failure(store, operation.operation_id, error)
             raise
         except Exception as raw_error:
+            operation_log = store.operation_paths(operation.operation_id).events
             unexpected_failure = OperationFailedError(
                 "candidate validation failed safely: "
                 + secrets.redact_text(f"{type(raw_error).__name__}: {raw_error}"),
@@ -304,9 +180,258 @@ def validate_configured_candidate(
             )
             _finish_failure(store, operation.operation_id, unexpected_failure)
             raise unexpected_failure from None
-        finally:
+
+
+def run_candidate_stage(
+    loaded: LoadedConfiguration,
+    *,
+    version: str,
+    config_path: Path,
+    operation_id: str,
+    store: StateStore,
+    lock: DeploymentLock,
+    command_environment: Mapping[str, str] | None = None,
+    command_runner: SubprocessRunner | None = None,
+    application_runner: ApplicationRunner | None = None,
+    health_checker: HealthChecker | None = None,
+    cancellation_event: threading.Event | None = None,
+    complete_operation: bool = False,
+    stage_observer: CandidateStageObserver | None = None,
+) -> CandidateValidationResult:
+    """Run the production-read-only pre-cutover stage in a caller-owned operation."""
+    release = validate_release_identifier(version)
+    config = loaded.config
+    secrets = loaded.secrets
+    _require_candidate_stage_owner(
+        loaded,
+        operation_id=operation_id,
+        store=store,
+        lock=lock,
+    )
+    operation_log = store.operation_paths(operation_id).events
+    environment = dict(os.environ if command_environment is None else command_environment)
+    working_directory = config_path.resolve().parent
+    runner = command_runner or SubprocessRunner(
+        secrets=secrets,
+        max_output_bytes=MIGRATION_MAX_OUTPUT_BYTES,
+    )
+    owned_health: CandidateHealthChecker | None = None
+
+    try:
+        preflight = verify_sqlite_database(config.database.path)
+        store.transition(
+            operation_id,
+            status=OperationStatus.IN_PROGRESS,
+            stage="preflight_passed",
+            message="Production SQLite preflight passed without mutation.",
+            evidence=preflight.model_dump(mode="json"),
+        )
+        _notify_stage(
+            stage_observer,
+            DeploymentState.PREFLIGHT_PASSED,
+            preflight.model_dump(mode="json"),
+        )
+        snapshot = create_verified_backup(
+            config.database.path,
+            project=secrets.redact_text(config.project),
+            purpose=BackupPurpose.REHEARSAL,
+            storage=LocalBackupStorage(config.backup.local_directory),
+            operation_id=operation_id,
+            metadata_source_path=_safe_metadata_path(config.database.path, loaded),
+        )
+        snapshot_evidence: dict[str, JsonValue] = {
+            "backup_id": snapshot.metadata.backup_id,
+            "backup_path": str(snapshot.database_path),
+            "sha256": snapshot.metadata.sha256,
+            "size_bytes": snapshot.metadata.size_bytes,
+        }
+        store.transition(
+            operation_id,
+            status=OperationStatus.IN_PROGRESS,
+            stage="snapshot_verified",
+            message="Verified candidate rehearsal snapshot completed.",
+            evidence=snapshot_evidence,
+        )
+        _notify_stage(
+            stage_observer,
+            DeploymentState.SNAPSHOT_VERIFIED,
+            snapshot_evidence,
+        )
+
+        def record_migration_command(evidence: MigrationCommandEvidence) -> None:
+            store.append_event(
+                operation_id,
+                message="Candidate migration command reached a terminal outcome.",
+                evidence={"migration_command": evidence.model_dump(mode="json")},
+            )
+
+        selected_runner = application_runner or DockerComposeCandidateRunner(
+            project=config.project,
+            application=config.application,
+            database_environment_name=config.database.path_env,
+            production_database_path=config.database.path,
+            secrets=secrets,
+            working_directory=working_directory,
+            command_environment=environment,
+            command_runner=runner,
+        )
+        selected_health = health_checker
+        if selected_health is None:
+            owned_health = CandidateHealthChecker(
+                application=config.application,
+                database_environment_name=config.database.path_env,
+                secrets=secrets,
+                working_directory=working_directory,
+                command_environment=environment,
+                command_runner=runner,
+            )
+            selected_health = owned_health
+
+        with migration_rehearsal(
+            snapshot,
+            operation_id=operation_id,
+            command=config.migration.command,
+            database_environment_name=config.database.path_env,
+            timeout_seconds=config.migration.timeout_seconds,
+            workspace_root=config.state_directory / WORKSPACE_DIRECTORY_NAME,
+            working_directory=working_directory,
+            environment=environment,
+            runner=runner,
+            command_evidence_sink=record_migration_command,
+            cancellation_event=cancellation_event,
+            log_path=operation_log,
+        ) as active:
+            rehearsal_evidence = _rehearsal_summary(active.result)
+            store.transition(
+                operation_id,
+                status=OperationStatus.IN_PROGRESS,
+                stage="rehearsal_passed",
+                message="Migration rehearsal passed; candidate validation may begin.",
+                evidence=rehearsal_evidence,
+            )
+            _notify_stage(
+                stage_observer,
+                DeploymentState.REHEARSAL_PASSED,
+                rehearsal_evidence,
+            )
+            runtime = _validate_runtime(
+                runner=selected_runner,
+                health_checker=selected_health,
+                active=active,
+                operation_id=operation_id,
+                version=release,
+                store=store,
+                operation_log=operation_log,
+                cancellation_event=cancellation_event,
+            )
             if owned_health is not None:
                 owned_health.close()
+                owned_health = None
+
+        result = CandidateValidationResult(
+            operation_id=operation_id,
+            version=release,
+            rehearsal=active.result,
+            health=runtime.health,
+            logs=runtime.logs,
+            cleanup=runtime.cleanup,
+            completed_at=utc_now(),
+        )
+        terminal_status = (
+            OperationStatus.SUCCEEDED if complete_operation else OperationStatus.IN_PROGRESS
+        )
+        candidate_evidence: dict[str, JsonValue] = {
+            **_rehearsal_summary(result.rehearsal),
+            "requested_version": release,
+            "readiness_attempts": result.health.readiness.attempt_count,
+            "smoke_outcome": (
+                None if result.health.smoke is None else result.health.smoke.outcome.value
+            ),
+            "candidate_cleanup_proven": result.cleanup.proof.proven,
+            "rehearsal_workspace_cleaned": True,
+        }
+        store.transition(
+            operation_id,
+            status=terminal_status,
+            stage="candidate_healthy",
+            message="Candidate checks and candidate/rehearsal cleanup completed successfully.",
+            evidence=candidate_evidence,
+            safety=SafetyFacts(
+                production_changed=False,
+                previous_application_running=None,
+                recovery_required=False,
+            ),
+        )
+        _notify_stage(
+            stage_observer,
+            DeploymentState.CANDIDATE_HEALTHY,
+            candidate_evidence,
+        )
+        return result
+    except MigrationWorkspaceCleanupError as error:
+        raise RecoveryRequiredError(
+            error.payload.what_failed,
+            production_changed=False,
+            previous_application_running=None,
+            log_path=operation_log,
+            next_safe_action=(
+                "Production was not changed. Preserve the operation evidence and remove only "
+                "the recorded private rehearsal workspace before recovery."
+            ),
+        ) from None
+    except DployDBError:
+        raise
+    except Exception as raw_error:
+        raise OperationFailedError(
+            "candidate validation failed safely: "
+            + secrets.redact_text(f"{type(raw_error).__name__}: {raw_error}"),
+            production_changed=False,
+            previous_application_running=None,
+            log_path=operation_log,
+            next_safe_action=(
+                "Production was not changed; inspect the candidate event log, correct the "
+                "failure, and retry."
+            ),
+        ) from None
+    finally:
+        if owned_health is not None:
+            owned_health.close()
+
+
+def _require_candidate_stage_owner(
+    loaded: LoadedConfiguration,
+    *,
+    operation_id: str,
+    store: StateStore,
+    lock: DeploymentLock,
+) -> None:
+    config = loaded.config
+    if store.root != config.state_directory or lock.state_directory != config.state_directory:
+        raise ValueError("candidate stage state and lock must use the configured state directory")
+    if not lock.acquired or lock.owner is None or lock.owner.operation_id != operation_id:
+        raise SafetyCheckError(
+            "candidate stage requires the matching durable deployment lock owner",
+            production_changed=False,
+            previous_application_running=None,
+            log_path=lock.owner_path,
+            next_safe_action="Acquire and record the caller-owned operation before retrying.",
+        )
+    operation = store.read_manifest(operation_id)
+    expected_fingerprint = configuration_fingerprint(config, secrets=loaded.secrets)
+    if (
+        operation.status is not OperationStatus.IN_PROGRESS
+        or operation.stage != "created"
+        or operation.operation_type not in {"candidate_validation", "deploy"}
+        or operation.project != config.project
+        or operation.configuration_fingerprint != expected_fingerprint
+    ):
+        raise SafetyCheckError(
+            "candidate stage operation does not match a fresh configured deployment",
+            production_changed=False,
+            previous_application_running=None,
+            log_path=store.operation_paths(operation_id).events,
+            next_safe_action="Preserve the operation evidence and start a fresh deployment.",
+        )
 
 
 def _validate_runtime(
@@ -702,6 +827,15 @@ def _rehearsal_summary(result: MigrationRehearsalResult) -> dict[str, JsonValue]
         "migration_duration_seconds": result.command.duration_seconds,
         "sqlite": result.sqlite.model_dump(mode="json"),
     }
+
+
+def _notify_stage(
+    observer: CandidateStageObserver | None,
+    stage: DeploymentState,
+    evidence: Mapping[str, JsonValue],
+) -> None:
+    if observer is not None:
+        observer(stage, evidence)
 
 
 def _finish_failure(store: StateStore, operation_id: str, error: DployDBError) -> None:

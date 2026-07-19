@@ -31,8 +31,10 @@ from dploydb.models import (
     OperationStatus,
     RestoreResult,
     SafetyFacts,
+    VerifiedDatabaseRestoreResult,
     utc_now,
 )
+from dploydb.redaction import SecretRegistry
 from dploydb.sqlite_checks import verify_sqlite_database
 from dploydb.state import StateStore
 from dploydb.storage.local import LocalBackupStorage
@@ -41,6 +43,94 @@ RESTORE_TIMEOUT_SECONDS: Final[float] = 120.0
 COPY_CHUNK_BYTES: Final[int] = 1024 * 1024
 FILE_MODE: Final[int] = 0o600
 FaultInjector = Callable[[str], None]
+
+
+def restore_verified_database(
+    artifact: BackupArtifact,
+    target: Path,
+    *,
+    application_stopped: bool,
+    traffic_activated: bool,
+    secrets: SecretRegistry,
+    fault_injector: FaultInjector | None = None,
+) -> VerifiedDatabaseRestoreResult:
+    """Restore one verified backup inside an existing locked pre-traffic cutover."""
+    if traffic_activated:
+        raise SafetyCheckError(
+            "automatic database restore is forbidden after new traffic was activated",
+            production_changed=True,
+            previous_application_running=False,
+            log_path=target,
+            next_safe_action=(
+                "Keep the current database and use the confirmed manual restore workflow."
+            ),
+        )
+    if not application_stopped:
+        raise SafetyCheckError(
+            "automatic database restore requires every managed database user to be stopped",
+            production_changed=True,
+            previous_application_running=None,
+            log_path=target,
+            next_safe_action="Stop and prove every database user before retrying rollback.",
+        )
+    if not target.is_absolute() or target == artifact.database_path:
+        raise ValueError("restore target must be an absolute production path distinct from backup")
+
+    inject = fault_injector or _no_fault
+    staged: Path | None = None
+    replacement_started = False
+    try:
+        _verify_materialized(artifact.database_path, artifact)
+        staged = _materialize_backup(artifact, target.parent)
+        _verify_materialized(staged, artifact)
+        inject("rollback_after_staging")
+        _remove_sqlite_sidecars(target)
+        os.replace(staged, target)
+        staged = None
+        replacement_started = True
+        os.chmod(target, FILE_MODE, follow_symlinks=False)
+        _fsync_directory(target.parent)
+        inject("rollback_after_replace")
+        _verify_materialized(target, artifact)
+        size_bytes, sha256 = calculate_sha256(target)
+        sqlite = verify_sqlite_database(target)
+        return VerifiedDatabaseRestoreResult(
+            backup_id=artifact.metadata.backup_id,
+            database_path=target,
+            size_bytes=size_bytes,
+            sha256=sha256,
+            sqlite=sqlite,
+            restored_at=utc_now(),
+        )
+    except Exception as raw_error:
+        if staged is not None:
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                raw_error.add_note(
+                    secrets.redact_text(f"Rollback staging cleanup also failed: {cleanup_error}")
+                )
+        detail = secrets.redact_text(f"{type(raw_error).__name__}: {raw_error}")
+        if replacement_started:
+            raise RecoveryRequiredError(
+                "verified database rollback started replacement but could not be proven: " + detail,
+                production_changed=True,
+                previous_application_running=False,
+                log_path=target,
+                next_safe_action=(
+                    "Keep every application stopped and verify or restore the recorded final "
+                    "backup manually."
+                ),
+            ) from None
+        raise OperationFailedError(
+            "verified database rollback failed before replacement: " + detail,
+            production_changed=True,
+            previous_application_running=False,
+            log_path=target,
+            next_safe_action=(
+                "Keep every application stopped, reverify the final backup, and retry rollback."
+            ),
+        ) from None
 
 
 def restore_stopped_database(

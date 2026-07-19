@@ -10,14 +10,27 @@ from rich.console import Console
 
 from dploydb.backup import create_configured_backup, verify_configured_backup
 from dploydb.config import DEFAULT_CONFIG_PATH, initialize_configuration, load_configuration
+from dploydb.deploy import DeploymentResult, deploy_configured_release
 from dploydb.diagnostics import (
     DoctorReport,
     StatusReport,
     inspect_runtime_status,
     run_doctor,
 )
-from dploydb.errors import DployDBError, InternalError, redact_error
-from dploydb.models import BackupArtifact, DiagnosticOutcome, FailurePayload
+from dploydb.errors import (
+    ERROR_EXIT_CODES,
+    DployDBError,
+    ErrorKind,
+    ExitCode,
+    InternalError,
+    redact_error,
+)
+from dploydb.models import (
+    BackupArtifact,
+    DeploymentState,
+    DiagnosticOutcome,
+    FailurePayload,
+)
 from dploydb.redaction import SecretRegistry
 
 app = typer.Typer(
@@ -165,6 +178,93 @@ def _render_backup_result(
             f"Size: {result['size_bytes']} bytes",
             f"SHA-256: {result['sha256']}",
             "SQLite checks: passed",
+        )
+    )
+
+
+def _rolled_back_failure(result: DeploymentResult) -> FailurePayload:
+    failure = result.release.failure
+    if failure is None:
+        raise ValueError("rolled-back deployment requires durable failure evidence")
+    try:
+        exit_code = int(ERROR_EXIT_CODES[ErrorKind(failure.error_code)])
+    except (KeyError, ValueError):
+        exit_code = int(ExitCode.OPERATION_FAILED)
+    return FailurePayload(
+        error_code=failure.error_code,
+        exit_code=exit_code,
+        what_failed=failure.what_failed,
+        production_changed=result.operation.safety.production_changed,
+        previous_application_running=result.operation.safety.previous_application_running,
+        recovery_required=False,
+        log_path=failure.log_path or str(result.release.operation_log_path),
+        next_safe_action=failure.next_safe_action,
+    )
+
+
+def _deployment_result_data(
+    result: DeploymentResult,
+    *,
+    non_interactive: bool,
+) -> dict[str, object]:
+    release = result.release
+    common: dict[str, object] = {
+        "command": "deploy",
+        "outcome": release.status.value,
+        "release_id": release.release_id,
+        "operation_id": release.operation_id,
+        "requested_version": release.requested_version,
+        "production_changed": result.operation.safety.production_changed,
+        "previous_application_running": result.operation.safety.previous_application_running,
+        "recovery_required": result.operation.safety.recovery_required,
+        "traffic_activated": release.traffic_activated,
+        "final_backup_id": release.final_backup_id,
+        "final_backup_sha256": release.final_backup_sha256,
+        "log_path": str(release.operation_log_path),
+        "non_interactive": non_interactive,
+    }
+    if result.active:
+        return {"ok": True, **common}
+    if result.rolled_back:
+        payload = _rolled_back_failure(result)
+        return {**payload.as_dict(), **common}
+    raise ValueError(f"deployment returned non-terminal state {release.status.value}")
+
+
+def _render_deployment_result(
+    result: DeploymentResult,
+    *,
+    json_output: bool,
+    non_interactive: bool,
+) -> str:
+    data = _deployment_result_data(result, non_interactive=non_interactive)
+    if json_output:
+        return json.dumps(data, sort_keys=True, separators=(",", ":"))
+    release = result.release
+    if release.status is DeploymentState.ACTIVE:
+        return "\n".join(
+            (
+                "DployDB deployment completed.",
+                "Outcome: active",
+                f"Release ID: {release.release_id}",
+                f"Version: {release.requested_version}",
+                "Production changed: yes",
+                "Previous application running: no",
+                "Recovery required: no",
+                f"Traffic activated: {_yes_no_unknown(release.traffic_activated)}",
+                f"Final backup: {release.final_backup_id or 'not available'}",
+                f"Relevant log: {release.operation_log_path}",
+                "Next safe action: monitor the active release and preserve its final backup.",
+            )
+        )
+    failure = _rolled_back_failure(result)
+    return "\n".join(
+        (
+            "DployDB deployment was rolled back safely.",
+            "Outcome: rolled_back",
+            f"Release ID: {release.release_id}",
+            f"Version: {release.requested_version}",
+            render_failure(failure, json_output=False),
         )
     )
 
@@ -320,6 +420,56 @@ def backup_command(
             secrets=loaded.secrets,
         )
     )
+
+
+@app.command("deploy")
+def deploy_command(
+    release_version: Annotated[
+        str,
+        typer.Option("--version", help="Validated release version to deploy."),
+    ],
+    config_path: Annotated[
+        Path,
+        typer.Option("--config", "-c", help="Configuration file for the deployment."),
+    ] = DEFAULT_CONFIG_PATH,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Emit stable machine-readable output."),
+    ] = False,
+    non_interactive: Annotated[
+        bool,
+        typer.Option(
+            "--non-interactive",
+            help="Never wait for terminal input; fail when future confirmation is required.",
+        ),
+    ] = False,
+) -> None:
+    """Run the checked production cutover with automatic pre-traffic rollback."""
+    loaded = None
+    try:
+        loaded = load_configuration(config_path)
+        result = deploy_configured_release(
+            loaded,
+            version=release_version,
+            config_path=config_path,
+        )
+    except DployDBError as error:
+        if loaded is not None:
+            error = redact_error(error, secrets=loaded.secrets)
+        abort_with_error(error, json_output=json_output)
+    except Exception:
+        abort_with_error(_internal_error(), json_output=json_output)
+
+    typer.echo(
+        _render_deployment_result(
+            result,
+            json_output=json_output,
+            non_interactive=non_interactive,
+        ),
+        err=not json_output and result.rolled_back,
+    )
+    if result.rolled_back:
+        raise typer.Exit(code=_rolled_back_failure(result).exit_code)
 
 
 @app.command("verify")

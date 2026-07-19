@@ -4,7 +4,7 @@ DployDB is being built as a deployment-safety tool for applications that use one
 
 ## Current status
 
-Milestones 0 through 3 and candidate-runner slice 4A provide:
+Milestones 0 through 5 provide:
 
 - an installable `dploydb` CLI with help and version commands;
 - strict, duplicate-safe configuration parsing with environment interpolation;
@@ -29,18 +29,26 @@ Milestones 0 through 3 and candidate-runner slice 4A provide:
   the rehearsed SQLite directory at the configured container target, validates
   live mounts/ports/labels before acceptance, captures bounded redacted logs,
   and proves idempotent container/network cleanup;
+- a public `dploydb deploy --version <version>` command that runs verified
+  backup, migration rehearsal, isolated candidate checks, controlled
+  maintenance, stopped-writer final backup, production migration, final
+  application/database checks, and traffic activation under one durable lock;
+- exact previous-container preservation and automatic application/database
+  rollback for failures before new traffic activation, with durable release,
+  hook, health, checksum, and event evidence;
 - a deterministic Docker Compose demo application;
 - working v1 and v2 release fixtures;
 - a deliberately broken migration fixture;
 - a deliberately unhealthy application fixture;
+- a production-only final-health failure fixture used to prove real cutover
+  rollback after candidate validation passes;
 - real SQLite reads, writes, and data-preserving migration behavior.
 
 The demo controller is **not** the DployDB deployment engine. Migration
-rehearsal and the low-level candidate runner are currently internal deployment
-stages. The public `deploy --version` flow waits for HTTP readiness/smoke checks,
-durable candidate orchestration, and controlled cutover. Those higher-level
-candidate checks, production cutover, application rollback, the public
-manual-restore command, and crash recovery are not implemented yet.
+rehearsal and candidate validation are internal stages of the public deployment
+engine. Controlled production cutover and automatic pre-traffic rollback are
+implemented. Public manual restore, interrupted-operation recovery, remote
+backup storage, and retention are not implemented yet.
 
 ## Prerequisites
 
@@ -116,6 +124,31 @@ curl --fail-with-body \
 ```
 
 These commands are deterministic fixture controls, not safe deployment orchestration.
+
+## Deploy with DployDB
+
+After adapting the generated configuration to the real absolute database,
+Compose, backup, health, migration, and traffic-hook paths, deploy with:
+
+```bash
+dploydb deploy --version v2 --config /absolute/path/to/dploydb.yaml
+dploydb deploy --version v2 --config /absolute/path/to/dploydb.yaml \
+  --json --non-interactive
+```
+
+The command does not modify production until the verified snapshot, migration
+rehearsal, and isolated candidate checks pass. During cutover it enables
+maintenance, stops the exact current container, creates and verifies a final
+backup, migrates production, starts and checks the new application while normal
+traffic remains blocked, then activates traffic and records the release.
+
+If a failure occurs before traffic activation, DployDB restores the final
+backup when needed, restarts the exact previous container, activates the old
+target, disables maintenance, verifies the old application/database, and
+returns an `outcome` of `rolled_back`. Once new traffic may be active, DployDB
+does not automatically restore the old database; uncertain routing or
+post-activation failure is reported as `recovery_required` with the evidence
+log and next safe action.
 
 ## Observe the broken migration
 
@@ -212,6 +245,11 @@ Candidate isolation defaults to container port `8080` and database volume target
 `application.database_volume_target` explicitly when the Compose service uses
 different container-side values. Compose files may use the reserved
 `DPLOYDB_VERSION` interpolation value; test-mode configuration cannot override it.
+Production deployment additionally requires `application.production_project`,
+`application.production_port`, and `application.production_health_url`, with a
+distinct candidate port. All four traffic commands are bounded argument arrays;
+they must implement maintenance on/off and new/old target activation
+idempotently.
 
 `demo/dploydb.yaml` is another valid example for the deterministic fixture. Its
 `/srv/dploydb-demo` paths and placeholder traffic hooks must be adapted before
@@ -263,9 +301,8 @@ it already exists. Backup database and metadata files are written with mode
 only committed backup IDs in Milestone 2. Public release restore and remote
 upload remain assigned to later milestones.
 
-The Milestone 3 rehearsal API and Milestone 4A candidate lifecycle are
-intentionally internal until readiness, smoke, and durable candidate validation
-are implemented. A configured
-migration command must use `database.path_env` for its database target and must
-not hard-code the production path or perform unrelated production side effects;
-DployDB does not claim to sandbox an arbitrary developer-supplied executable.
+The rehearsal and candidate lifecycle APIs remain internal implementation
+stages of `deploy`. A configured migration command must use `database.path_env`
+for its database target and must not hard-code the production path or perform
+unrelated production side effects; DployDB does not claim to sandbox an
+arbitrary developer-supplied executable.

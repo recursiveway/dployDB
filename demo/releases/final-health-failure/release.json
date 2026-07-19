@@ -1,0 +1,11 @@
+{
+  "name": "final-health-failure",
+  "schema": {
+    "from_version": 1,
+    "to_version": 2
+  },
+  "health": {
+    "mode": "production_broken",
+    "failure_reason": "fixture_final_production_health_failure"
+  }
+}

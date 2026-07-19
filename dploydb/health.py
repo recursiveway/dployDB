@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import Final, Self
 
 import httpx
 
@@ -20,6 +20,7 @@ from dploydb.runners.base import CommandExecutor, validate_release_identifier
 from dploydb.subprocesses import CommandOutcome, CommandResult, SubprocessRunner
 
 CANDIDATE_URL_ENV: Final = "DPLOYDB_CANDIDATE_URL"
+APPLICATION_URL_ENV: Final = "DPLOYDB_APPLICATION_URL"
 DPLOYDB_VERSION_ENV: Final = "DPLOYDB_VERSION"
 DEFAULT_REQUEST_TIMEOUT_SECONDS: Final = 2.0
 DEFAULT_RETRY_INTERVAL_SECONDS: Final = 0.1
@@ -239,16 +240,19 @@ class _BoundedBodyCapture:
         )
 
 
-class CandidateHealthChecker:
-    """Check one isolated candidate without trusting container process state alone."""
+class ApplicationHealthChecker:
+    """Check one configured application endpoint without trusting process state alone."""
 
     def __init__(
         self,
         *,
         application: ApplicationConfig,
+        health_url: str,
         database_environment_name: str,
         secrets: SecretRegistry,
         working_directory: Path,
+        smoke_environment: Mapping[str, str] | None = None,
+        health_url_environment_name: str = APPLICATION_URL_ENV,
         command_environment: Mapping[str, str] | None = None,
         command_runner: CommandExecutor | None = None,
         client: httpx.Client | None = None,
@@ -263,15 +267,20 @@ class CandidateHealthChecker:
             raise ValueError("provide either an HTTPX client or transport, not both")
         if not database_environment_name or "=" in database_environment_name:
             raise ValueError("database_environment_name must be a valid environment name")
+        if not health_url or not health_url_environment_name or "=" in health_url_environment_name:
+            raise ValueError("health URL and its environment name must be valid")
         if not working_directory.is_absolute():
             raise ValueError("working_directory must be absolute")
         self.application = application
+        self.health_url = health_url
+        self.health_url_environment_name = health_url_environment_name
         self.database_environment_name = database_environment_name
         self.secrets = secrets
         self.working_directory = working_directory
         self.command_environment = dict(
             os.environ if command_environment is None else command_environment
         )
+        self.smoke_environment = dict(smoke_environment or {})
         self.command_runner = command_runner or SubprocessRunner(
             secrets=secrets,
             max_output_bytes=SMOKE_MAX_OUTPUT_BYTES,
@@ -292,7 +301,7 @@ class CandidateHealthChecker:
             trust_env=False,
         )
 
-    def __enter__(self) -> CandidateHealthChecker:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -303,26 +312,26 @@ class CandidateHealthChecker:
         if self._owns_client:
             self._client.close()
 
-    def check(
+    def check_application(
         self,
         *,
         version: str,
-        rehearsal_database_path: Path,
+        database_path: Path,
         cancellation_event: threading.Event | None = None,
     ) -> CandidateHealthResult:
         """Require readiness before the optional smoke command can execute."""
         release = validate_release_identifier(version)
-        database_path = _absolute_existing_file(rehearsal_database_path)
+        selected_database = _absolute_existing_file(database_path)
         readiness = self.wait_until_ready(cancellation_event=cancellation_event)
         command = self.application.smoke_command
         if command is None:
             return CandidateHealthResult(readiness=readiness, smoke=None)
 
         environment = dict(self.command_environment)
-        environment.update(self.application.test_mode_env)
-        environment[self.database_environment_name] = str(database_path)
+        environment.update(self.smoke_environment)
+        environment[self.database_environment_name] = str(selected_database)
         environment[DPLOYDB_VERSION_ENV] = release
-        environment[CANDIDATE_URL_ENV] = self.application.candidate_health_url
+        environment[self.health_url_environment_name] = self.health_url
         smoke = self.command_runner.run(
             command,
             timeout_seconds=self.application.startup_timeout_seconds,
@@ -343,7 +352,7 @@ class CandidateHealthChecker:
         """Poll the configured URL under one monotonic overall deadline."""
         started_at = self._clock()
         deadline = started_at + float(self.application.startup_timeout_seconds)
-        safe_url = self.secrets.redact_text(self.application.candidate_health_url)
+        safe_url = self.secrets.redact_text(self.health_url)
         attempts = 0
         last_attempt: HealthAttemptEvidence | None = None
 
@@ -419,7 +428,7 @@ class CandidateHealthChecker:
             capture = _BoundedBodyCapture(self.max_response_bytes)
             with self._client.stream(
                 "GET",
-                self.application.candidate_health_url,
+                self.health_url,
                 follow_redirects=False,
                 timeout=httpx.Timeout(timeout),
             ) as response:
@@ -513,6 +522,59 @@ class CandidateHealthChecker:
 
     def _duration(self, started_at: float) -> float:
         return max(0.0, self._clock() - started_at)
+
+
+class CandidateHealthChecker(ApplicationHealthChecker):
+    """Backward-compatible candidate health adapter over the generic boundary."""
+
+    def __init__(
+        self,
+        *,
+        application: ApplicationConfig,
+        database_environment_name: str,
+        secrets: SecretRegistry,
+        working_directory: Path,
+        command_environment: Mapping[str, str] | None = None,
+        command_runner: CommandExecutor | None = None,
+        client: httpx.Client | None = None,
+        transport: httpx.BaseTransport | None = None,
+        request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        retry_interval_seconds: float = DEFAULT_RETRY_INTERVAL_SECONDS,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        super().__init__(
+            application=application,
+            health_url=application.candidate_health_url,
+            database_environment_name=database_environment_name,
+            secrets=secrets,
+            working_directory=working_directory,
+            smoke_environment=application.test_mode_env,
+            health_url_environment_name=CANDIDATE_URL_ENV,
+            command_environment=command_environment,
+            command_runner=command_runner,
+            client=client,
+            transport=transport,
+            request_timeout_seconds=request_timeout_seconds,
+            retry_interval_seconds=retry_interval_seconds,
+            max_response_bytes=max_response_bytes,
+            clock=clock,
+            sleeper=sleeper,
+        )
+
+    def check(
+        self,
+        *,
+        version: str,
+        rehearsal_database_path: Path,
+        cancellation_event: threading.Event | None = None,
+    ) -> CandidateHealthResult:
+        return self.check_application(
+            version=version,
+            database_path=rehearsal_database_path,
+            cancellation_event=cancellation_event,
+        )
 
 
 def _smoke_failure(result: CommandResult) -> str | None:

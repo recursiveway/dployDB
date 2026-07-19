@@ -21,6 +21,9 @@ application:
   runner: docker_compose
   compose_file: /srv/dploydb-demo/demo/compose.yaml
   service: app
+  production_project: dploydb-demo
+  production_port: 4510
+  production_health_url: http://127.0.0.1:4510/health
   candidate_port: 4511
   candidate_container_port: 8080
   database_volume_target: /data
@@ -34,6 +37,7 @@ traffic:
   maintenance_off_command: [/srv/dploydb-demo/ops/maintenance, "off"]
   activate_new_command: [/srv/dploydb-demo/ops/activate, candidate]
   activate_old_command: [/srv/dploydb-demo/ops/activate, current]
+  timeout_seconds: 30
 
 backup:
   local_directory: /srv/dploydb-demo/backups

@@ -13,7 +13,9 @@ import pytest
 
 from dploydb.config import ApplicationConfig
 from dploydb.health import (
+    APPLICATION_URL_ENV,
     CANDIDATE_URL_ENV,
+    ApplicationHealthChecker,
     BoundedResponseEvidence,
     CandidateHealthChecker,
     HealthAttemptOutcome,
@@ -274,6 +276,39 @@ print(os.environ["API_TOKEN"])
     assert result.smoke.stdout.text == f"{REDACTION_MARKER}\n"
     assert CANDIDATE_URL_ENV in result.smoke.environment_keys
     assert secret not in str(result.as_evidence())
+
+
+def test_generic_application_health_uses_supplied_url_without_candidate_test_mode(
+    tmp_path: Path,
+) -> None:
+    code = """
+import os
+assert os.environ["DPLOYDB_VERSION"] == "v2"
+assert os.environ["DPLOYDB_APPLICATION_URL"] == "http://127.0.0.1:4510/health"
+assert os.path.isfile(os.environ["DATABASE_PATH"])
+assert "DPLOYDB_TEST_MODE" not in os.environ
+"""
+    selected_application = application(smoke_command=[sys.executable, "-c", code])
+    with ApplicationHealthChecker(
+        application=selected_application,
+        health_url="http://127.0.0.1:4510/health",
+        database_environment_name="DATABASE_PATH",
+        secrets=SecretRegistry(),
+        working_directory=tmp_path.resolve(),
+        command_environment={},
+        command_runner=SubprocessRunner(secrets=SecretRegistry()),
+        transport=httpx.MockTransport(lambda _request: httpx.Response(204)),
+        request_timeout_seconds=0.1,
+        retry_interval_seconds=0.1,
+    ) as selected:
+        result = selected.check_application(
+            version="v2",
+            database_path=database(tmp_path),
+        )
+
+    assert result.readiness.healthy is True
+    assert result.smoke is not None and result.smoke.succeeded is True
+    assert APPLICATION_URL_ENV in result.smoke.environment_keys
 
 
 @pytest.mark.parametrize(

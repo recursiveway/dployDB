@@ -217,7 +217,7 @@ def migration_rehearsal(
             working_directory=working_directory,
             cancellation_event=cancellation_event,
         )
-        command_evidence = _command_evidence(command_result)
+        command_evidence = migration_command_evidence(command_result)
         command_evidence_sink(command_evidence)
         _require_usable_command_result(command_result, log_path)
         try:
@@ -284,7 +284,8 @@ def migration_rehearsal(
             primary_error.add_note(f"Rehearsal workspace cleanup also failed: {cleanup_error}")
 
 
-def _command_evidence(result: CommandResult) -> MigrationCommandEvidence:
+def migration_command_evidence(result: CommandResult) -> MigrationCommandEvidence:
+    """Convert one bounded subprocess result into durable migration evidence."""
     return MigrationCommandEvidence(
         command=result.command,
         working_directory=result.working_directory,

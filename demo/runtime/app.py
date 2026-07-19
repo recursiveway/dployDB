@@ -45,6 +45,7 @@ class AppConfig:
     database_path: Path
     release: ReleaseDefinition
     port: int
+    test_mode: bool
 
 
 def _required_environment_path(name: str) -> Path:
@@ -74,7 +75,12 @@ def _load_config() -> AppConfig:
     if not 1 <= port <= 65535:
         raise StartupError("PORT must be between 1 and 65535")
 
-    return AppConfig(database_path=database_path, release=release, port=port)
+    return AppConfig(
+        database_path=database_path,
+        release=release,
+        port=port,
+        test_mode=os.environ.get("DPLOYDB_TEST_MODE") == "1",
+    )
 
 
 def _json_bytes(payload: JsonValue) -> bytes:
@@ -237,7 +243,10 @@ class DemoRequestHandler(BaseHTTPRequestHandler):
             )
             return
 
-        if self.config.release.health.mode == "broken":
+        health_mode = self.config.release.health.mode
+        if health_mode == "broken" or (
+            health_mode == "production_broken" and not self.config.test_mode
+        ):
             reason = self.config.release.health.failure_reason or "fixture_broken_health"
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "reason": reason})
             return

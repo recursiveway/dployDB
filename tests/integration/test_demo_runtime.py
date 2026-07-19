@@ -99,7 +99,7 @@ def json_request(
 
 
 @contextmanager
-def running_app(database: Path, release: str) -> Iterator[int]:
+def running_app(database: Path, release: str, *, test_mode: bool = False) -> Iterator[int]:
     port = available_port()
     environment = os.environ.copy()
     environment.update(
@@ -109,6 +109,10 @@ def running_app(database: Path, release: str) -> Iterator[int]:
             "PORT": str(port),
         }
     )
+    if test_mode:
+        environment["DPLOYDB_TEST_MODE"] = "1"
+    else:
+        environment.pop("DPLOYDB_TEST_MODE", None)
     process = subprocess.Popen(
         [sys.executable, "-m", "demo.runtime.app"],
         cwd=ROOT,
@@ -282,6 +286,35 @@ def test_broken_health_is_a_deterministic_http_failure(tmp_path: Path) -> None:
             {"ok": False, "reason": "fixture_broken_health"},
         )
         assert request(port, "/notes") == (200, [])
+
+
+def test_final_health_fixture_passes_candidate_mode_and_fails_production(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "app.db"
+    create_database(database)
+    assert run_migration(database, "v1").returncode == 0
+    migration = run_migration(database, "final-health-failure")
+    assert migration.returncode == 0, migration.stderr
+
+    with running_app(database, "final-health-failure", test_mode=True) as port:
+        assert request(port, "/health") == (
+            200,
+            {
+                "ok": True,
+                "release": "final-health-failure",
+                "schema_version": 2,
+            },
+        )
+
+    with running_app(database, "final-health-failure") as port:
+        assert request(port, "/health") == (
+            503,
+            {
+                "ok": False,
+                "reason": "fixture_final_production_health_failure",
+            },
+        )
 
 
 def test_schema_mismatch_is_never_reported_healthy(tmp_path: Path) -> None:

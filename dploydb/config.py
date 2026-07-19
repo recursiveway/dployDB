@@ -143,12 +143,47 @@ class MigrationConfig(StrictConfigModel):
     timeout_seconds: PositiveInt
 
 
+def _validate_local_health_url(
+    value: str,
+    *,
+    expected_port: int,
+    field_name: str,
+    port_name: str,
+    info: ValidationInfo,
+) -> None:
+    if _allow_unresolved(info) and _contains_interpolation(value):
+        return
+    try:
+        parsed = urlsplit(value)
+        parsed_port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a valid local HTTP URL") from exc
+
+    if parsed.scheme != "http":
+        raise ValueError(f"{field_name} must use http")
+    if parsed.hostname is None or parsed.hostname.lower() not in _LOCAL_HEALTH_HOSTS:
+        raise ValueError(f"{field_name} must use a loopback host")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"{field_name} must not contain credentials")
+    if parsed_port is None:
+        raise ValueError(f"{field_name} must include the {port_name}")
+    if parsed_port != expected_port:
+        raise ValueError(f"{field_name} port must match {port_name}")
+    if not parsed.path.startswith("/"):
+        raise ValueError(f"{field_name} must contain an absolute URL path")
+    if parsed.query or parsed.fragment:
+        raise ValueError(f"{field_name} must not contain a query or fragment")
+
+
 class ApplicationConfig(StrictConfigModel):
     """Single Docker Compose application and isolated candidate settings."""
 
     runner: Literal["docker_compose"]
     compose_file: AbsolutePath
     service: NonEmptyText
+    production_project: NonEmptyText | None = None
+    production_port: Port | None = None
+    production_health_url: NonEmptyText | None = None
     candidate_port: Port
     candidate_container_port: Port = 8080
     database_volume_target: NonEmptyText = "/data"
@@ -175,9 +210,11 @@ class ApplicationConfig(StrictConfigModel):
             _non_empty_text(environment_value)
         return value
 
-    @field_validator("service")
+    @field_validator("service", "production_project")
     @classmethod
-    def validate_service_name(cls, value: str, info: ValidationInfo) -> str:
+    def validate_compose_name(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None:
+            return None
         if _allow_unresolved(info) and _contains_interpolation(value):
             return value
         if _COMPOSE_SERVICE_NAME.fullmatch(value) is None:
@@ -201,31 +238,38 @@ class ApplicationConfig(StrictConfigModel):
         return value
 
     @model_validator(mode="after")
-    def validate_candidate_health_url(self, info: ValidationInfo) -> Self:
-        value = self.candidate_health_url
-        if _allow_unresolved(info) and _contains_interpolation(value):
+    def validate_health_topology(self, info: ValidationInfo) -> Self:
+        _validate_local_health_url(
+            self.candidate_health_url,
+            expected_port=self.candidate_port,
+            field_name="candidate_health_url",
+            port_name="candidate_port",
+            info=info,
+        )
+
+        production_values = (
+            self.production_project,
+            self.production_port,
+            self.production_health_url,
+        )
+        if all(value is None for value in production_values):
             return self
-
-        try:
-            parsed = urlsplit(value)
-            parsed_port = parsed.port
-        except ValueError as exc:
-            raise ValueError("candidate_health_url must be a valid local HTTP URL") from exc
-
-        if parsed.scheme != "http":
-            raise ValueError("candidate_health_url must use http")
-        if parsed.hostname is None or parsed.hostname.lower() not in _LOCAL_HEALTH_HOSTS:
-            raise ValueError("candidate_health_url must use a loopback host")
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError("candidate_health_url must not contain credentials")
-        if parsed_port is None:
-            raise ValueError("candidate_health_url must include the candidate port")
-        if parsed_port != self.candidate_port:
-            raise ValueError("candidate_health_url port must match candidate_port")
-        if not parsed.path.startswith("/"):
-            raise ValueError("candidate_health_url must contain an absolute URL path")
-        if parsed.query or parsed.fragment:
-            raise ValueError("candidate_health_url must not contain a query or fragment")
+        if any(value is None for value in production_values):
+            raise ValueError(
+                "production_project, production_port, and production_health_url "
+                "must be configured together"
+            )
+        assert self.production_port is not None
+        assert self.production_health_url is not None
+        if self.production_port == self.candidate_port:
+            raise ValueError("production_port must differ from candidate_port")
+        _validate_local_health_url(
+            self.production_health_url,
+            expected_port=self.production_port,
+            field_name="production_health_url",
+            port_name="production_port",
+            info=info,
+        )
         return self
 
 
@@ -236,6 +280,7 @@ class TrafficConfig(StrictConfigModel):
     maintenance_off_command: ArgumentArray
     activate_new_command: ArgumentArray
     activate_old_command: ArgumentArray
+    timeout_seconds: PositiveInt = 30
 
 
 class RemoteBackupConfig(StrictConfigModel):
@@ -333,6 +378,34 @@ class LoadedConfiguration:
 
     config: DployDBConfig
     secrets: SecretRegistry
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionTopology:
+    """Deploy-only production application topology proven by configuration."""
+
+    compose_project: str
+    host_port: int
+    health_url: str
+
+
+def require_deploy_topology(config: DployDBConfig) -> ProductionTopology:
+    """Return complete deploy topology or fail before any operational access."""
+    application = config.application
+    if (
+        application.production_project is None
+        or application.production_port is None
+        or application.production_health_url is None
+    ):
+        raise _configuration_error(
+            "deployment requires application.production_project, production_port, "
+            "and production_health_url"
+        )
+    return ProductionTopology(
+        compose_project=application.production_project,
+        host_port=application.production_port,
+        health_url=application.production_health_url,
+    )
 
 
 def configuration_fingerprint(config: DployDBConfig, *, secrets: SecretRegistry) -> str:
@@ -564,6 +637,10 @@ application:
   runner: docker_compose
   compose_file: /srv/example/compose.yaml
   service: app
+  # The existing production service is preserved exactly for rollback.
+  production_project: example-app
+  production_port: 4510
+  production_health_url: http://127.0.0.1:4510/health
   candidate_port: 4511
   # Container-side defaults are explicit so candidate isolation can be inspected.
   candidate_container_port: 8080
@@ -580,6 +657,7 @@ traffic:
   maintenance_off_command: [/srv/example/ops/maintenance, "off"]
   activate_new_command: [/srv/example/ops/activate, candidate]
   activate_old_command: [/srv/example/ops/activate, current]
+  timeout_seconds: 30
 
 backup:
   local_directory: /srv/dploydb/backups/example-app

@@ -128,12 +128,12 @@ def load_release(path: Path) -> ReleaseDefinition:
     if mode_value == "ok":
         _require_exact_keys(health_value, {"mode"}, "health")
         health = HealthSpec(mode="ok", failure_reason=None)
-    elif mode_value == "broken":
+    elif mode_value in {"broken", "production_broken"}:
         _require_exact_keys(health_value, {"mode", "failure_reason"}, "health")
         failure_reason = _require_string(health_value["failure_reason"], "health.failure_reason")
-        health = HealthSpec(mode="broken", failure_reason=failure_reason)
+        health = HealthSpec(mode=mode_value, failure_reason=failure_reason)
     else:
-        raise ReleaseDefinitionError("health.mode must be 'ok' or 'broken'")
+        raise ReleaseDefinitionError("health.mode must be 'ok', 'broken', or 'production_broken'")
 
     return ReleaseDefinition(
         name=name,
