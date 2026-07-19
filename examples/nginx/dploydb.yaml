@@ -1,0 +1,73 @@
+# Production-shaped example for one fixed-port Docker Compose application
+# behind the Nginx configuration in this directory. Adjust every path, user,
+# service, domain, port, and command before running doctor.
+project: example-app
+
+state_directory: /var/lib/dploydb/example-app/state
+
+database:
+  path: /srv/example-app/data/app.db
+  path_env: DATABASE_PATH
+  minimum_free_space_multiplier: 3
+
+migration:
+  command: [/srv/example-app/.venv/bin/python, /srv/example-app/scripts/migrate.py]
+  timeout_seconds: 120
+
+application:
+  runner: docker_compose
+  compose_file: /srv/example-app/compose.yaml
+  service: app
+  production_project: example-app
+  production_port: 4510
+  production_health_url: http://127.0.0.1:4510/health
+  candidate_port: 4511
+  candidate_container_port: 8080
+  database_volume_target: /data
+  candidate_health_url: http://127.0.0.1:4511/health
+  startup_timeout_seconds: 45
+  smoke_command: [/srv/example-app/.venv/bin/python, /srv/example-app/scripts/smoke.py]
+  test_mode_env:
+    DPLOYDB_TEST_MODE: "1"
+
+traffic:
+  maintenance_on_command:
+    - python3
+    - /opt/dploydb/nginx/dploydb-hook.py
+    - --state-file
+    - /var/lib/dploydb/example-app/proxy-target.json
+    - --maintenance-file
+    - /run/dploydb/example-app.maintenance
+    - maintenance-on
+  maintenance_off_command:
+    - python3
+    - /opt/dploydb/nginx/dploydb-hook.py
+    - --state-file
+    - /var/lib/dploydb/example-app/proxy-target.json
+    - --maintenance-file
+    - /run/dploydb/example-app.maintenance
+    - maintenance-off
+  activate_new_command:
+    - python3
+    - /opt/dploydb/nginx/dploydb-hook.py
+    - --state-file
+    - /var/lib/dploydb/example-app/proxy-target.json
+    - --maintenance-file
+    - /run/dploydb/example-app.maintenance
+    - activate-new
+  activate_old_command:
+    - python3
+    - /opt/dploydb/nginx/dploydb-hook.py
+    - --state-file
+    - /var/lib/dploydb/example-app/proxy-target.json
+    - --maintenance-file
+    - /run/dploydb/example-app.maintenance
+    - activate-old
+  timeout_seconds: 30
+
+backup:
+  local_directory: /var/lib/dploydb/example-app/backups
+  keep_last: 10
+  remote:
+    enabled: false
+    required: false
