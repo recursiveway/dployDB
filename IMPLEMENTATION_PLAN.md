@@ -2410,12 +2410,58 @@ GitHub preparation evidence observed on 2026-07-19:
   enforcement. Protection includes administrators, requires linear history and
   resolved review conversations, and prohibits force-pushes and deletion.
 
-Status: `LOCAL GATE COMPLETE; PUBLICATION PENDING`. No signed `v0.1.0` tag
-exists. The dedicated SSH signing key, matching TestPyPI/PyPI pending Trusted
-Publishers, release PR merge, registry uploads, and GitHub prerelease still
-require their ordered external gates. Registry URLs, public hashes, signed-tag
-evidence, and GitHub prerelease evidence must be appended here after those
-gates pass. The release must not be called published before that verification.
+#### Alpha 0.1.0 immutable-tag workflow recovery
+
+Planned on 2026-07-19 after failed publication run
+[`29685288229`](https://github.com/recursiveway/dployDB/actions/runs/29685288229):
+
+- **Observed safe state:** annotated SSH-signed tag `v0.1.0` targets reviewed
+  `main` commit `bd7c0ed71afeecddc435a809c12eadeec35fef77`; local verification,
+  the release-tag helper, GitHub verification, and main CI all pass. The failed
+  workflow stopped at tag identity verification before building, attesting,
+  drafting a release, or reaching either registry environment.
+- **Root cause:** `actions/checkout` materialized the pushed annotated tag as a
+  peeled local commit ref. The verifier correctly rejects lightweight tags but
+  inspected that checkout-created ref before the workflow explicitly fetched
+  the remote annotated tag object.
+- **Recovery boundary:** do not move, delete, or recreate `v0.1.0`. Add a
+  protected `workflow_dispatch` recovery input that accepts only the canonical
+  tag, explicitly fetches its annotated object, and checks out that immutable
+  tagged source for every job that reads repository files. Normal `v*` pushes
+  remain the primary release trigger.
+- **Security boundary:** remote GitHub API evidence must still prove that the
+  ref is an annotated tag with a verified signature and a target contained in
+  `origin/main`. Manual recovery must retain the same protected `testpypi` then
+  `pypi` approvals, least-privilege job permissions, exact artifact reuse,
+  checksums, provenance, public install verification, and prerelease finalizer.
+- **Acceptance gate:** focused workflow/tag tests, actionlint, Ruff, format,
+  strict mypy for the verifier, the complete safety suite, and a protected PR
+  must pass. Dispatch `tag=v0.1.0` only from the merged `main` workflow and do
+  not call the release published until both registries and GitHub verify it.
+
+Local recovery evidence observed on 2026-07-19:
+
+- `git verify-tag v0.1.0` accepted the Ed25519 signature with fingerprint
+  `SHA256:CzffVvqABshVVWQq15jFeSP3MJ4odvbSJgF8P9vwDGY`; the helper proved
+  the tag matches package version `0.1.0` and is contained in `origin/main`.
+  GitHub reported `verified=true`, `reason=valid`, and target commit
+  `bd7c0ed71afeecddc435a809c12eadeec35fef77`.
+- Pinned actionlint `v1.7.7` accepted the recovery workflow. A disposable Git
+  repository reproduced the runner's peeled commit ref, then proved the new
+  explicit fetch restores object type `tag` with the unchanged `bd7c0ed`
+  target. The disposable repository was removed afterward.
+- Focused workflow, metadata, and SQLite safety tests passed (`29 passed`).
+  Ruff check and format check passed for all `98` Python files; strict mypy
+  passed for `34` package modules, `9` demo modules, and the tag verifier.
+- `uv lock --check` retained all `65` resolved packages; the ignored editable
+  environment was refreshed from the unchanged lockfile. The complete suite
+  passed with unrestricted Docker and loopback access (`589 passed in
+  172.75s`). `git diff --check` passed.
+
+Status: `LOCAL RECOVERY GATE COMPLETE; PROTECTED PR PENDING`. The immutable tag
+has not moved. Registry URLs, public hashes, Trusted Publisher results, and
+GitHub prerelease evidence must be appended here after the merged recovery run
+passes. The release must not be called published before that verification.
 
 ---
 

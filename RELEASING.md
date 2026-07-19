@@ -66,6 +66,14 @@ different bytes. Keep the GitHub release as a draft, diagnose the failure, and
 rerun the immutable tag workflow when safe. PyPI files cannot be replaced or
 rolled back; a bad public release must be yanked and superseded by a new patch.
 
+If a tag-triggered run fails before artifacts are built because the runner did
+not materialize the annotated tag object, preserve the verified tag. Fix the
+workflow through a protected pull request, merge it to `main`, and manually
+dispatch `Publish release` from `main` with the existing canonical tag. The
+recovery path explicitly fetches that remote tag object and checks out the
+immutable tagged source; it must not be used to move or recreate a tag. The
+normal protected TestPyPI and PyPI approvals still apply.
+
 ## One-time repository setup
 
 - Make the repository public, enable Issues, private vulnerability reporting,
