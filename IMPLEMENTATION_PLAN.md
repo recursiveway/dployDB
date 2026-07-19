@@ -70,8 +70,9 @@ The product must be useful after the hackathon. Do not build fake progress scree
 - **Milestone 4 slices:** 4A isolated Docker Compose runner, 4B bounded
   HTTP readiness and optional smoke checks, and 4C durable candidate-validation
   orchestration plus the real old-application-continuity gate.
-- **Next allowed milestone:** Milestone 7 — S3-compatible verified backup and
-  retention. Remote storage and retention are not yet implemented.
+- **Current milestone:** Milestone 7 — S3-compatible verified backup and
+  retention (`COMPLETE` on 2026-07-19). All slices 7A through 7G and the live
+  Cloudflare R2 acceptance gate passed; Milestone 8 is the next allowed work.
 - **Dependency workflow:** Use uv for project dependencies and development commands. Support and verify `pipx install .` as the isolated end-user installation path.
 - **Repository outcome:** Every existing `.gitignore` rule remains, including `IMPLEMENTATION_PLAN.md`; `demo/.state/` was added for generated demo databases.
 
@@ -1617,8 +1618,8 @@ Slice 5F and final Milestone 5 acceptance evidence observed on 2026-07-19:
   DployDB network. The end-to-end gate also performed exact project-token
   cleanup and asserted no matching container remained after every scenario.
 
-Milestones 0 through 6 are complete. Milestone 7 is the next allowed work;
-off-server backup and retention remain intentionally unclaimed.
+At this Milestone 5 checkpoint, Milestone 6 was the next allowed work;
+off-server backup and retention remained intentionally unclaimed.
 
 #### Milestone 6 implementation scope
 
@@ -1879,8 +1880,252 @@ Acceptance evidence observed on 2026-07-19:
   backup-first behavior, recovery preview/confirmation, exact safe refusal,
   idempotent retry, and the no-automatic-database-rollback traffic boundary.
 
-Milestone 6 is complete. Milestone 7 is the next allowed work; no remote backup
-or retention behavior is claimed.
+At this Milestone 6 checkpoint, Milestone 7 was the next allowed work; no remote
+backup or retention behavior was yet claimed.
+
+#### Milestone 7 implementation scope
+
+Planned on 2026-07-19:
+
+- **Execution decision:** implement Milestone 7 as seven independently gated
+  slices. Remote configuration, network storage, restore hydration, deployment
+  failure semantics, and destructive retention have separate safety boundaries.
+- **Owned modules:** bounded additions to `dploydb/config.py`, `models.py`,
+  `backup.py`, `restore.py`, `manual_restore.py`, `deploy.py`,
+  `deployment_dependencies.py`, `diagnostics.py`, and `cli.py`; a new
+  `dploydb/storage/s3.py` and `dploydb/retention.py`; the storage contracts and
+  local deletion behavior under `dploydb/storage/`; dependency metadata,
+  documentation, and focused unit/integration/fault tests.
+- **Compatibility boundary:** support AWS S3 and S3-compatible services,
+  including Cloudflare R2 with `region_name: auto`, a custom HTTPS endpoint,
+  path-style addressing, and a relative object prefix. Credentials are resolved
+  only from named environment variables, registered for redaction, and never
+  serialized.
+- **Remote commit boundary:** upload a previously reverified local database
+  object first and immutable metadata last. A remote backup is committed only
+  when both objects can be read back and their size/checksum/identity evidence
+  agrees. Every request uses bounded botocore timeouts and bounded retry/backoff.
+- **Restore boundary:** download into a private local temporary file, verify the
+  remote metadata, size, SHA-256, and SQLite contents, then publish the hydrated
+  artifact through the existing immutable local store before any restore can
+  inspect or mutate production.
+- **Deployment boundary:** when remote storage is required, the stopped-writer
+  final backup must be remotely committed before production migration starts.
+  A failed upload leaves the database unchanged and enters the existing
+  pre-traffic application rollback path.
+- **Retention boundary:** derive one immutable protected set from the active and
+  previous release manifests, preserve every referenced rehearsal/final backup,
+  keep the newest configured unprotected backups, and make partial local/remote
+  deletion safe to retry. Retention runs only after the active release and
+  pointers are durable.
+- **Credential boundary:** real service credentials are runtime-only acceptance
+  inputs. Tests, examples, logs, operation events, release manifests, reports,
+  and this plan contain only environment-variable names and synthetic secrets.
+
+Progress tracker:
+
+- [x] Milestone 7 overall — S3-compatible verified backup, restore hydration,
+  required-remote deployment policy, and protected retention (`COMPLETE` on
+  2026-07-19).
+  - [x] 7A — remote configuration, storage/evidence contracts, dependency, and
+    side-effect-free validation (`COMPLETE` on 2026-07-19).
+  - [x] 7B — S3-compatible adapter with metadata-last commit, bounded retry,
+    download, listing, verification, idempotent cleanup, and redaction
+    (`COMPLETE` on 2026-07-19).
+  - [x] 7C — verified `backup --upload` orchestration and stable human/JSON
+    output (`COMPLETE` on 2026-07-19).
+  - [x] 7D — verified remote hydration and restore/recovery fallback when the
+    protected local artifact is absent (`COMPLETE` on 2026-07-19).
+  - [x] 7E — required final-backup upload before production migration and the
+    failed-upload application-continuity gate (`COMPLETE` on 2026-07-19).
+  - [x] 7F — idempotent local/remote retention with active/previous release
+    protection, applied only after durable activation (`COMPLETE` on
+    2026-07-19).
+  - [x] 7G — real Cloudflare R2 compatibility gate, full regression/static/
+    packaging validation, CLI/demo exercise, documentation, and final audit
+    (`COMPLETE` on 2026-07-19).
+
+Tracking rule: a later slice starts only after the earlier slice's focused
+tests pass. Update this section with exact commands and observed results before
+marking any slice or the overall milestone complete.
+
+##### 7A — Remote contracts and configuration
+
+Status on 2026-07-19: `COMPLETE`. Configuration now distinguishes enabled and
+required remote policy; accepts an HTTPS endpoint value or named endpoint
+environment variable, `region_name: auto`, Standard/Standard-IA storage class,
+relative normalized prefixes, and positive request/retry bounds; and preserves
+disabled-remote compatibility. Credentials remain named references. Strict
+remote record/artifact models and a separate off-server replica protocol avoid
+weakening the local online-snapshot storage boundary. Boto3 is a locked runtime
+dependency.
+
+Acceptance evidence:
+
+- `.venv/bin/python -m pytest -q tests/test_config.py` — passed (`105 passed`).
+  Coverage includes required/enabled contradictions, endpoint exclusivity and
+  HTTPS/loopback rules, bucket/prefix validation, region/storage defaults,
+  positive bounds, credential references, and side-effect-free parsing.
+- `.venv/bin/ruff check ...`, format check, and `.venv/bin/mypy ...` passed for
+  the configuration, models, storage contract, and focused tests.
+- `uv lock && uv sync --locked` resolved and installed Boto3 1.43.51 and
+  Botocore 1.43.51 without storing any service credential.
+
+##### 7B — S3-compatible storage adapter
+
+Status on 2026-07-19: `COMPLETE`. `dploydb/storage/s3.py` rechecks the local
+checksum and SQLite database, uploads database bytes first, reads back and
+hashes the remote bytes, and publishes immutable JSON metadata last. Downloads
+require a caller-owned mode-0600 staging file and pass size, SHA-256, and SQLite
+verification. The adapter implements paginated listing, strict metadata/object
+identity checks, safe repair of an uncommitted partial object, idempotent
+metadata-first deletion, redacted SDK failures, S3v4 path-style addressing,
+Cloudflare R2's `auto` region, and bounded standard retries plus connect/read
+timeouts.
+
+Acceptance evidence:
+
+- `.venv/bin/python -m pytest -q tests/unit/test_s3_storage.py` — passed
+  (`8 passed`). Coverage proves metadata-last ordering, full remote readback,
+  verified download, idempotent exact retry, contradictory identity refusal,
+  corrupt-download cleanup/refusal, partial-upload repair, deletion order and
+  repeatability, runtime-only credential registration, R2 client settings,
+  missing-credential refusal before client creation, and error redaction.
+- `.venv/bin/ruff check ...` and `.venv/bin/mypy ...` passed for the adapter,
+  models, and focused tests.
+
+##### 7C — Verified standalone upload orchestration
+
+Status on 2026-07-19: `COMPLETE`. The public `backup --upload` command creates
+and reverifies the local online snapshot before invoking remote storage. A
+required remote policy uploads even without the explicit flag. Local-only
+success remains backward compatible; uploaded results include stable non-secret
+provider/bucket/object/timestamp evidence. Remote failure ends the operation
+`failed_safe`, preserves the verified local artifact, reports production
+unchanged, and never prints a registered credential.
+
+Acceptance evidence:
+
+- `.venv/bin/python -m pytest -q tests/integration/test_backup_cli.py
+  tests/unit/test_backup.py tests/unit/test_restore.py` — passed (`25 passed`).
+  Coverage proves explicit upload, automatic required-policy upload, stable JSON
+  and human output, durable `remote_snapshot_verified`, preserved local backup
+  after remote failure, redaction, and disabled-remote refusal before local/state
+  mutation.
+
+##### 7D — Verified remote hydration and restore fallback
+
+Status on 2026-07-19: `COMPLETE`. A missing local artifact can be resolved from
+enabled remote storage into a fresh mode-0700 temporary directory and
+mode-0600 staging file. The S3 adapter checks object metadata, stream size,
+SHA-256, and SQLite contents; the bytes are then published and reverified with
+the existing immutable local storage implementation inside that temporary
+scope. Manual restore preview copies only verified metadata, confirmed restore
+re-downloads under the deployment lock before maintenance, and recovery
+diagnosis/execution use the same fallback. Present-but-corrupt local evidence
+never silently falls back to remote storage.
+
+Acceptance evidence:
+
+- `.venv/bin/python -m pytest -q tests/unit/test_s3_storage.py` — passed
+  (`10 passed`). The added gate removes the local artifact, hydrates the real
+  SQLite bytes from the S3 protocol peer, restores them through the production
+  restore transaction, proves the expected row/checksum, and proves temporary
+  cleanup. A corrupt present local artifact produces no remote request.
+- `.venv/bin/python -m pytest -q` over backup, S3, manual restore, restore,
+  recovery, both CLI suites, and root CLI tests — passed (`67 passed`). Ruff,
+  format check, and strict mypy passed for all `33` package source files.
+
+##### 7E — Required final backup before production migration
+
+Status on 2026-07-19: `COMPLETE`. Required remote storage is now an explicit
+deployment dependency. After writers stop, DployDB creates and persists the
+verified final local backup, commits and verifies its matching off-server
+record with the release identity, and only then writes production-migration
+intent or invokes the migration. A missing, failed, or contradictory remote
+commit enters the existing pre-traffic rollback path: no database restore is
+attempted because production never changed, while the exact previous
+application, old traffic target, maintenance state, database checks, and health
+are all restored and proven.
+
+Acceptance evidence:
+
+- `.venv/bin/pytest -q tests/unit/test_deploy.py -k required_remote` — passed
+  (`2 passed`). The success gate proves durable remote evidence precedes the
+  `production_migration_started` event. The failure gate proves no migration
+  call or migration-intent event, an unchanged production checksum/schema,
+  `failed_safe` with `production_changed=false`, and a healthy previous
+  application after old-target and maintenance restoration.
+- `.venv/bin/ruff check ...`, format check, and strict `.venv/bin/mypy dploydb`
+  passed for the deployment boundary and all `33` package source files.
+
+##### 7F — Protected local and remote retention
+
+Status on 2026-07-19: `COMPLETE`. Retention takes one fully validated release
+history snapshot after the new release manifest and active/previous pointers
+are durable. It protects both rehearsal and final backup IDs from the active
+and immediately previous releases, keeps the newest configured count of
+additional project backups, never deletes records from another project, and
+plans local and remote inventories before deletion. Local deletion is now
+metadata-first and safely resumable when only database bytes remain; remote
+deletion already has the same commit-marker-first retry property. A retention
+failure after traffic activation is recorded as failed-safe housekeeping and
+never triggers a forbidden database rollback.
+
+Acceptance evidence:
+
+- `.venv/bin/pytest -q tests/unit/test_retention.py tests/unit/test_backup.py`
+  — passed (`11 passed`). Coverage proves old active/previous backups survive a
+  `keep_last` of two locally and remotely, the newest unprotected backups are
+  retained, foreign-project records are preserved, repeated cleanup is a
+  no-op, a local-success/remote-failure pass resumes safely, and a metadata-
+  first local unlink interruption resumes without advertising missing bytes.
+- Focused retention, required-remote, S3, backup, deploy coordinator, backup
+  CLI, and non-Docker integration coverage passed (`60 passed`). The seven real
+  Docker tests could not access the sandboxed OrbStack socket in that run and
+  remain part of the final unrestricted validation gate.
+- Ruff, format check, and strict mypy passed for all `34` package source files.
+
+##### 7G — Real service, regression, packaging, and documentation gate
+
+Status on 2026-07-19: `COMPLETE`. Doctor
+now validates enabled remote runtime credentials in normal mode and performs a
+bounded read-only prefix-scoped bucket probe in deep mode. The README documents
+Cloudflare R2/AWS configuration, required-remote cutover behavior, remote
+hydration, retention protection, credential handling, and limitations. A
+generic acceptance helper prompts without echo, creates a unique child prefix,
+and proves upload, verified listing, verified download, SQLite restore, and
+idempotent cleanup without storing credentials.
+
+Acceptance evidence completed:
+
+- Final post-audit `.venv/bin/pytest -q` with unrestricted loopback and
+  OrbStack access — passed (`537 passed in 169.75s`). This includes the real
+  Docker success, production-
+  migration rollback, final-health rollback, three abrupt-process recovery
+  points, and backup-first manual restore gates.
+- `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` — passed (`86`
+  files formatted); strict `.venv/bin/mypy dploydb` and `.venv/bin/mypy demo` —
+  passed (`34` and `8` source files).
+- `uv lock --check`, `uv sync --locked --check`, `uv build`, and
+  `.venv/bin/python scripts/verify_pipx_install.py` — passed; both sdist and
+  wheel built and isolated `pipx` installation verification passed.
+- `git diff --check` — passed. No credential value is present in configuration,
+  documentation, durable evidence, test fixtures, or the acceptance helper.
+
+Live-service acceptance evidence:
+
+- `.venv/bin/python scripts/verify_s3_compatibility.py` against the supplied
+  Cloudflare R2 standard endpoint, `auto` region, `dploydb-backups` bucket, and
+  a unique child of the configured `dploydb/learn` prefix — passed. The safe
+  result recorded `upload_verified=true`, `download_verified=true`,
+  `sqlite_restore_verified=true`, and `cleanup_verified=true`. The access-key
+  pair was entered only through no-echo prompts; the unrelated Cloudflare API
+  token was not used. The metadata commit marker and database object were both
+  deleted and independently proven absent.
+
+Milestone 7 is complete. Milestone 8 is the next allowed work; no dashboard or
+other later-scope feature was started.
 
 ---
 

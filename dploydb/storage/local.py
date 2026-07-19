@@ -127,12 +127,35 @@ class LocalBackupStorage:
         return tuple(metadata)
 
     def delete(self, backup_id: str) -> None:
-        artifact = self.get(backup_id)
+        """Delete metadata first and safely resume an interrupted deletion."""
+        self._validate_id(backup_id)
+        self._validate_layout()
+        metadata_path = self.root / f"{backup_id}.json"
+        database_path = self.root / f"{backup_id}.db"
+        metadata_present = metadata_path.exists() or metadata_path.is_symlink()
+        database_present = database_path.exists() or database_path.is_symlink()
+        if not metadata_present and not database_present:
+            return
+
+        if metadata_present:
+            metadata = self.verify_metadata(backup_id)
+            database_path = self.root / metadata.database_file_name
+            database_present = database_path.exists() or database_path.is_symlink()
+            if not database_present:
+                raise self._verification_error(
+                    "committed backup metadata exists but its database is missing",
+                    metadata_path,
+                )
+        if database_present:
+            self._validate_committed_file(database_path, "backup database")
+
         try:
-            artifact.metadata_path.unlink()
-            self._fsync_directory()
-            artifact.database_path.unlink()
-            self._fsync_directory()
+            if metadata_present:
+                metadata_path.unlink()
+                self._fsync_directory()
+            if database_present:
+                database_path.unlink()
+                self._fsync_directory()
         except OSError as exc:
             raise self._storage_error(f"backup deletion failed: {exc}") from None
 

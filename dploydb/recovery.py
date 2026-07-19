@@ -10,7 +10,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
-from dploydb.backup import calculate_sha256, verify_configured_backup
+from dploydb.backup import calculate_sha256, open_verified_configured_backup
 from dploydb.config import (
     LoadedConfiguration,
     configuration_fingerprint,
@@ -51,6 +51,7 @@ from dploydb.runners.base import (
 )
 from dploydb.sqlite_checks import verify_sqlite_database
 from dploydb.state import StateStore
+from dploydb.storage.base import RemoteBackupStorage
 from dploydb.traffic import TrafficController, TrafficHookResult
 
 
@@ -198,18 +199,22 @@ def preview_configured_recovery(
     config_path: Path,
     command_environment: Mapping[str, str] | None = None,
     dependencies: RecoveryDependencies | None = None,
+    remote_storage: RemoteBackupStorage | None = None,
 ) -> RecoveryPlan:
     """Build a live recovery plan without acquiring a mutating lock or writing state."""
+    environment = dict(os.environ if command_environment is None else command_environment)
     selected, owned_health = _configured_recovery_dependencies(
         loaded,
         config_path=config_path,
-        command_environment=command_environment,
+        command_environment=environment,
         dependencies=dependencies,
     )
     try:
         return diagnose_configured_recovery(
             loaded,
             application_inspector=selected.production,
+            environment=environment,
+            remote_storage=remote_storage,
         )
     finally:
         if owned_health is not None:
@@ -222,14 +227,16 @@ def recover_configured_deployment(
     config_path: Path,
     command_environment: Mapping[str, str] | None = None,
     dependencies: RecoveryDependencies | None = None,
+    remote_storage: RemoteBackupStorage | None = None,
     cancellation_event: threading.Event | None = None,
     fault_injector: FaultInjector | None = None,
 ) -> RecoveryResult:
     """Execute only a freshly revalidated, deterministic recovery plan."""
+    environment = dict(os.environ if command_environment is None else command_environment)
     selected, owned_health = _configured_recovery_dependencies(
         loaded,
         config_path=config_path,
-        command_environment=command_environment,
+        command_environment=environment,
         dependencies=dependencies,
     )
     store = StateStore(loaded.config.state_directory, secrets=loaded.secrets)
@@ -242,6 +249,8 @@ def recover_configured_deployment(
                 loaded,
                 application_inspector=selected.production,
                 check_lock=False,
+                environment=environment,
+                remote_storage=remote_storage,
             )
             if not plan.executable:
                 raise RecoveryRequiredError(
@@ -280,6 +289,8 @@ def recover_configured_deployment(
                     operation_log=operation_log,
                     cancellation_event=cancellation_event,
                     inject=inject,
+                    environment=environment,
+                    remote_storage=remote_storage,
                 )
             except BaseException as raw_error:
                 error = _normalize_recovery_error(raw_error, plan, operation_log, loaded)
@@ -297,6 +308,8 @@ def diagnose_configured_recovery(
     *,
     application_inspector: RecoveryApplicationInspector,
     check_lock: bool = True,
+    environment: Mapping[str, str] | None = None,
+    remote_storage: RemoteBackupStorage | None = None,
 ) -> RecoveryPlan:
     """Read all durable/live evidence and return a plan without changing state."""
     state_directory = loaded.config.state_directory
@@ -403,12 +416,16 @@ def diagnose_configured_recovery(
     final_sha256: str | None = None
     if release.final_backup_id is not None:
         try:
-            artifact = verify_configured_backup(loaded, release.final_backup_id)
+            with open_verified_configured_backup(
+                loaded,
+                release.final_backup_id,
+                environment=environment,
+                remote_storage=remote_storage,
+            ) as artifact:
+                final_verified = artifact.metadata.sha256 == release.final_backup_sha256
+                final_sha256 = artifact.metadata.sha256
         except Exception:
             pass
-        else:
-            final_verified = artifact.metadata.sha256 == release.final_backup_sha256
-            final_sha256 = artifact.metadata.sha256
     try:
         _size_bytes, production_sha256 = calculate_sha256(loaded.config.database.path)
     except Exception:
@@ -594,6 +611,8 @@ def _execute_recovery_plan(
     operation_log: Path,
     cancellation_event: threading.Event | None,
     inject: FaultInjector,
+    environment: Mapping[str, str],
+    remote_storage: RemoteBackupStorage | None,
 ) -> RecoveryResult:
     release = releases.read_manifest(plan.release_id)
     previous = release.previous_application
@@ -636,6 +655,8 @@ def _execute_recovery_plan(
                 store=store,
                 operation_log=operation_log,
                 cancellation_event=cancellation_event,
+                environment=environment,
+                remote_storage=remote_storage,
             )
         elif action is RecoveryAction.RESTART_PREVIOUS_APPLICATION:
             if previous is None:
@@ -723,6 +744,8 @@ def _execute_database_recovery(
     store: StateStore,
     operation_log: Path,
     cancellation_event: threading.Event | None,
+    environment: Mapping[str, str],
+    remote_storage: RemoteBackupStorage | None,
 ) -> None:
     if previous is None or release.final_backup_id is None:
         raise RecoveryRequiredError(
@@ -737,22 +760,27 @@ def _execute_database_recovery(
         expected_running=False,
         cancellation_event=cancellation_event,
     )
-    artifact = verify_configured_backup(loaded, release.final_backup_id)
-    if artifact.metadata.sha256 != release.final_backup_sha256:
-        raise RecoveryRequiredError(
-            "recovery final backup checksum contradicts the release manifest",
-            production_changed=True,
-            previous_application_running=False,
-            log_path=artifact.metadata_path,
-            next_safe_action="Do not restore the contradictory backup.",
+    with open_verified_configured_backup(
+        loaded,
+        release.final_backup_id,
+        environment=environment,
+        remote_storage=remote_storage,
+    ) as artifact:
+        if artifact.metadata.sha256 != release.final_backup_sha256:
+            raise RecoveryRequiredError(
+                "recovery final backup checksum contradicts the release manifest",
+                production_changed=True,
+                previous_application_running=False,
+                log_path=artifact.metadata_path,
+                next_safe_action="Do not restore the contradictory backup.",
+            )
+        restored = restore_verified_database(
+            artifact,
+            loaded.config.database.path,
+            application_stopped=True,
+            traffic_activated=False,
+            secrets=loaded.secrets,
         )
-    restored = restore_verified_database(
-        artifact,
-        loaded.config.database.path,
-        application_stopped=True,
-        traffic_activated=False,
-        secrets=loaded.secrets,
-    )
     store.append_event(
         operation_id,
         message="The verified final backup was restored during recovery.",

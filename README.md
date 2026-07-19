@@ -4,7 +4,7 @@ DployDB is being built as a deployment-safety tool for applications that use one
 
 ## Current status
 
-Milestones 0 through 6 provide:
+Milestones 0 through 7 provide:
 
 - an installable `dploydb` CLI with help and version commands;
 - strict, duplicate-safe configuration parsing with environment interpolation;
@@ -17,7 +17,13 @@ Milestones 0 through 6 provide:
 - read-only `dploydb status`, including active, interrupted, stale, and recovery-required state;
 - SQLite online backups that remain consistent while the application is writing;
 - immutable mode-`0600` backup databases and metadata under a mode-`0700` directory;
-- `dploydb backup` and read-only `dploydb verify <backup-id>` with stable JSON output;
+- `dploydb backup [--upload]` and read-only `dploydb verify <backup-id>` with stable JSON output;
+- S3-compatible off-server replication, including Cloudflare R2, with local
+  verification before upload, database-first/metadata-last commit, full remote
+  readback verification, bounded requests/retries, and runtime-only credentials;
+- verified remote hydration when a protected local backup is absent, used by
+  manual restore and interrupted-operation recovery without accepting corrupt
+  local evidence;
 - an internal stopped-application restore engine that creates a verified pre-restore backup and
   restores it automatically if replacement fails;
 - an internal, lock-protected migration rehearsal stage that creates a verified
@@ -36,6 +42,9 @@ Milestones 0 through 6 provide:
 - exact previous-container preservation and automatic application/database
   rollback for failures before new traffic activation, with durable release,
   hook, health, checksum, and event evidence;
+- required final-backup replication before production migration, plus
+  post-activation local/remote retention that always protects the active and
+  immediately previous releases' rehearsal and final backups;
 - read-only `dploydb releases` and `dploydb release show <release-id>` history
   with validated active/previous pointers and preserved failure evidence;
 - `dploydb restore <release-id>`, which previews the protected immediately
@@ -57,8 +66,8 @@ Milestones 0 through 6 provide:
 The demo controller is **not** the DployDB deployment engine. Migration
 rehearsal and candidate validation are internal stages of the public deployment
 engine. Controlled production cutover, automatic pre-traffic rollback,
-release-aware manual restore, and interrupted-operation recovery are
-implemented. Remote backup storage and retention are not implemented yet.
+release-aware manual restore, interrupted-operation recovery, verified
+off-server backup, and protected retention are implemented.
 
 ## Prerequisites
 
@@ -151,6 +160,10 @@ rehearsal, and isolated candidate checks pass. During cutover it enables
 maintenance, stops the exact current container, creates and verifies a final
 backup, migrates production, starts and checks the new application while normal
 traffic remains blocked, then activates traffic and records the release.
+When `backup.remote.required` is true, the stopped-writer final backup must be
+committed and read back from remote storage before production migration intent
+is recorded. A failed upload restarts and verifies the previous application
+without migrating or restoring the unchanged database.
 
 If a failure occurs before traffic activation, DployDB restores the final
 backup when needed, restarts the exact previous container, activates the old
@@ -340,12 +353,13 @@ Compose CLI availability, candidate-port availability, lock ownership, durable
 operation state, and bounded read-only SQLite `quick_check` and
 `foreign_key_check` results. Deep mode additionally runs SQLite
 `integrity_check`, cleaned-up write probes, disk-space checks, Docker daemon
-inspection, and Compose service validation. Both modes explicitly report
-remote storage, migration execution, application health, and traffic execution
-as skipped. `doctor` never runs a developer migration as a diagnostic; the
-implemented internal rehearsal stage runs it only against a verified disposable
-copy inside a lock-tracked operation. The other skipped integrations remain
-assigned to their later milestones.
+inspection, and Compose service validation. When remote storage is disabled,
+both modes report it as skipped. When enabled, normal mode validates its runtime
+credentials and client configuration; deep mode also performs one bounded,
+read-only, prefix-scoped bucket access probe. Migration execution, application
+health, and traffic execution remain skipped. `doctor` never runs a developer
+migration as a diagnostic; the implemented internal rehearsal stage runs it
+only against a verified disposable copy inside a lock-tracked operation.
 
 Inspect current state without creating, repairing, or deleting state files:
 
@@ -368,11 +382,61 @@ uv run dploydb verify backup_0123456789abcdef0123456789abcdef \
   --config /absolute/path/to/dploydb.yaml
 ```
 
+Enable an S3-compatible target by naming environment variables rather than
+putting credentials in YAML. Cloudflare R2 uses its account endpoint and the
+`auto` region:
+
+```yaml
+backup:
+  local_directory: /srv/dploydb/backups/example-app
+  keep_last: 10
+  remote:
+    enabled: true
+    required: true
+    provider: s3
+    bucket: example-backups
+    prefix: dploydb/example-app
+    region_name: auto
+    endpoint_url_env: DPLOYDB_S3_ENDPOINT_URL
+    access_key_env: DPLOYDB_S3_ACCESS_KEY_ID
+    secret_key_env: DPLOYDB_S3_SECRET_ACCESS_KEY
+    timeout_seconds: 30
+    max_attempts: 3
+```
+
+```bash
+export DPLOYDB_S3_ENDPOINT_URL='https://ACCOUNT_ID.r2.cloudflarestorage.com'
+export DPLOYDB_S3_ACCESS_KEY_ID='...'
+export DPLOYDB_S3_SECRET_ACCESS_KEY='...'
+dploydb doctor --deep --config /absolute/path/to/dploydb.yaml
+dploydb backup --upload --config /absolute/path/to/dploydb.yaml --json
+```
+
+Use an R2 S3 access-key pair with access limited to the selected bucket. An R2
+API token is not used by DployDB's S3 adapter. Never commit credentials or pass
+them as command-line arguments. Uploaded database bytes are not considered
+committed until DployDB reads them back and verifies size and SHA-256, then
+publishes and rereads immutable metadata. Restore downloads to a private
+temporary file and repeats size, checksum, and SQLite verification.
+For AWS S3, set `region_name` to the bucket's AWS region instead of `auto`.
+
+To validate another S3-compatible service without writing credentials to disk
+or command history, run the acceptance helper and answer its no-echo credential
+prompts. It uses a unique child prefix, proves upload/list/download/SQLite
+restore/delete, and removes only the objects it created:
+
+```bash
+.venv/bin/python scripts/verify_s3_compatibility.py
+```
+
 The configured backup directory must be owned privately with mode `0700` when
 it already exists. Backup database and metadata files are written with mode
 `0600`; metadata is published last and is the success marker. `verify` accepts
 only committed backup IDs. Manual restore accepts a protected release ID rather
-than a raw backup ID. Remote upload remains assigned to Milestone 7.
+than a raw backup ID. After a release and its active pointer are durable,
+retention keeps the newest `keep_last` unprotected backups and additionally
+preserves every rehearsal and final backup referenced by the active and
+immediately previous releases, both locally and remotely.
 
 The rehearsal and candidate lifecycle APIs remain internal implementation
 stages of `deploy`. A configured migration command must use `database.path_env`

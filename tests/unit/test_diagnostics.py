@@ -103,6 +103,23 @@ def _load(config_path: Path, environment: dict[str, str]) -> LoadedConfiguration
     return load_configuration(config_path, environment=environment)
 
 
+def _enable_remote(config_path: Path, environment: dict[str, str]) -> LoadedConfiguration:
+    value = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    value["backup"]["remote"] = {
+        "enabled": True,
+        "required": True,
+        "provider": "s3",
+        "bucket": "doctor-test-backups",
+        "prefix": "dploydb/doctor-test",
+        "region_name": "auto",
+        "endpoint_url": "https://example.r2.cloudflarestorage.com",
+        "access_key_env": "DOCTOR_S3_ACCESS_KEY",
+        "secret_key_env": "DOCTOR_S3_SECRET_KEY",
+    }
+    config_path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    return _load(config_path, environment)
+
+
 def test_status_is_idle_and_does_not_create_state(tmp_path: Path) -> None:
     config_path, environment = configured_project(tmp_path)
     loaded = _load(config_path, environment)
@@ -275,6 +292,66 @@ def test_standard_and_deep_doctor_pass_and_mark_future_checks_skipped(tmp_path: 
     assert sqlite_check.outcome is DiagnosticOutcome.PASSED
     assert sqlite_check.evidence["integrity_check_passed"] is True
     assert not list(tmp_path.rglob(".dploydb-doctor-*.tmp"))
+
+
+def test_deep_doctor_probes_enabled_remote_storage_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, environment = configured_project(tmp_path)
+    environment["DOCTOR_S3_ACCESS_KEY"] = "synthetic-access-key"
+    environment["DOCTOR_S3_SECRET_KEY"] = "synthetic-secret-key"
+    loaded = _enable_remote(config_path, environment)
+    probes: list[str] = []
+
+    class FakeRemote:
+        def probe_access(self) -> None:
+            probes.append("probe")
+
+    monkeypatch.setattr(
+        "dploydb.diagnostics.configured_s3_storage",
+        lambda *_args, **_kwargs: FakeRemote(),
+    )
+
+    standard = run_doctor(
+        loaded,
+        config_path=config_path,
+        deep=False,
+        environment=environment,
+    )
+    deep = run_doctor(
+        loaded,
+        config_path=config_path,
+        deep=True,
+        environment=environment,
+    )
+
+    standard_remote = next(check for check in standard.checks if check.check_id == "remote_storage")
+    deep_remote = next(check for check in deep.checks if check.check_id == "remote_storage")
+    assert standard_remote.outcome is DiagnosticOutcome.PASSED
+    assert standard_remote.evidence["access_checked"] is False
+    assert deep_remote.outcome is DiagnosticOutcome.PASSED
+    assert deep_remote.evidence["access_checked"] is True
+    assert probes == ["probe"]
+
+
+def test_doctor_refuses_enabled_remote_storage_with_missing_runtime_credentials(
+    tmp_path: Path,
+) -> None:
+    config_path, environment = configured_project(tmp_path)
+    loaded = _enable_remote(config_path, environment)
+
+    report = run_doctor(
+        loaded,
+        config_path=config_path,
+        deep=False,
+        environment=environment,
+    )
+
+    remote = next(check for check in report.checks if check.check_id == "remote_storage")
+    assert remote.outcome is DiagnosticOutcome.FAILED
+    assert report.exit_code == 40
+    assert "remote access key environment variable is missing" in remote.message
 
 
 def test_doctor_failure_uses_safety_exit_and_lists_failed_check(tmp_path: Path) -> None:

@@ -248,8 +248,8 @@ def test_preview_maps_previous_release_to_active_final_backup(tmp_path: Path) ->
     assert preview.selected_release == first
     assert preview.current_application == second_app
     assert preview.selected_application == first.new_application
-    assert preview.selected_backup.metadata.backup_id == second.final_backup_id
-    assert preview.selected_backup.metadata.purpose is BackupPurpose.FINAL
+    assert preview.selected_backup_metadata.backup_id == second.final_backup_id
+    assert preview.selected_backup_metadata.purpose is BackupPurpose.FINAL
     assert preview.as_dict()["warning"] == DATA_LOSS_WARNING
     assert preview.as_dict()["pre_restore_backup_required"] is True
 

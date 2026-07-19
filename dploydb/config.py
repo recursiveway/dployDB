@@ -41,6 +41,7 @@ _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _INTERPOLATION = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _PROJECT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 _COMPOSE_SERVICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+_S3_BUCKET_NAME = re.compile(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]\Z")
 _LOCAL_HEALTH_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "localhost", "::1"})
 _RESERVED_CANDIDATE_ENVIRONMENT: Final[frozenset[str]] = frozenset({"DPLOYDB_VERSION"})
 
@@ -287,19 +288,64 @@ class RemoteBackupConfig(StrictConfigModel):
     """Optional S3-compatible backup configuration."""
 
     enabled: bool = False
+    required: bool = False
     provider: Literal["s3"] = "s3"
     bucket: NonEmptyText | None = None
     prefix: str = ""
+    region_name: NonEmptyText = "auto"
+    storage_class: Literal["STANDARD", "STANDARD_IA"] = "STANDARD"
+    endpoint_url: NonEmptyText | None = None
     endpoint_url_env: NonEmptyText | None = None
     access_key_env: NonEmptyText | None = None
     secret_key_env: NonEmptyText | None = None
+    session_token_env: NonEmptyText | None = None
+    timeout_seconds: PositiveInt = 30
+    max_attempts: PositiveInt = 3
 
-    @field_validator("endpoint_url_env", "access_key_env", "secret_key_env")
+    @field_validator(
+        "endpoint_url_env",
+        "access_key_env",
+        "secret_key_env",
+        "session_token_env",
+    )
     @classmethod
     def validate_environment_name(cls, value: str | None) -> str | None:
         if value is not None and _ENVIRONMENT_NAME.fullmatch(value) is None:
             raise ValueError("must be a valid environment-variable name")
         return value
+
+    @field_validator("bucket")
+    @classmethod
+    def validate_bucket(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None or (_allow_unresolved(info) and _contains_interpolation(value)):
+            return value
+        if _S3_BUCKET_NAME.fullmatch(value) is None or ".." in value:
+            raise ValueError("must be a valid lowercase S3-compatible bucket name")
+        return value
+
+    @field_validator("endpoint_url")
+    @classmethod
+    def validate_endpoint_url(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None or (_allow_unresolved(info) and _contains_interpolation(value)):
+            return value
+        try:
+            parsed = urlsplit(value)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("must be a valid S3-compatible endpoint URL") from exc
+        if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+            raise ValueError("must be an HTTP or HTTPS endpoint URL")
+        if parsed.scheme == "http" and parsed.hostname.lower() not in _LOCAL_HEALTH_HOSTS:
+            raise ValueError("must use HTTPS unless the endpoint host is loopback")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("must not contain credentials")
+        if parsed.query or parsed.fragment:
+            raise ValueError("must not contain a query or fragment")
+        if parsed.path not in {"", "/"}:
+            raise ValueError("must not contain an object path")
+        if port is not None and not 1 <= port <= 65535:
+            raise ValueError("contains an invalid port")
+        return value.rstrip("/")
 
     @field_validator("prefix")
     @classmethod
@@ -308,14 +354,20 @@ class RemoteBackupConfig(StrictConfigModel):
             return value
         if value.startswith("/"):
             raise ValueError("must be a relative object prefix")
-        if any(part == ".." for part in value.split("/")):
-            raise ValueError("must not contain parent-directory segments")
+        if value and any(part in {"", ".", ".."} for part in value.split("/")):
+            raise ValueError("must be a normalized relative object prefix")
         if "\x00" in value:
             raise ValueError("must not contain a NUL byte")
+        if len(value.encode("utf-8")) > 768:
+            raise ValueError("must not exceed 768 UTF-8 bytes")
         return value
 
     @model_validator(mode="after")
     def validate_enabled_remote(self) -> Self:
+        if self.required and not self.enabled:
+            raise ValueError("required remote backup must also be enabled")
+        if self.endpoint_url is not None and self.endpoint_url_env is not None:
+            raise ValueError("endpoint_url and endpoint_url_env are mutually exclusive")
         if not self.enabled:
             return self
         missing = [
@@ -662,10 +714,22 @@ traffic:
 backup:
   local_directory: /srv/dploydb/backups/example-app
   keep_last: 10
-  # Remote backup is optional and implemented in a later milestone.
+  # Remote backup is optional. Credentials are read only from named variables.
   remote:
     enabled: false
+    required: false
     provider: s3
+    bucket: example-backups
+    prefix: dploydb/example-app
+    region_name: auto
+    storage_class: STANDARD
+    # Set endpoint_url for S3-compatible services such as Cloudflare R2, or
+    # name an environment variable containing it with endpoint_url_env.
+    endpoint_url_env: S3_ENDPOINT_URL
+    access_key_env: S3_ACCESS_KEY_ID
+    secret_key_env: S3_SECRET_ACCESS_KEY
+    timeout_seconds: 30
+    max_attempts: 3
 """
 
 

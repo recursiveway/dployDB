@@ -89,6 +89,11 @@ def test_starter_configuration_is_strictly_valid() -> None:
     assert resolved.traffic.timeout_seconds == 30
     assert resolved.backup.remote is not None
     assert resolved.backup.remote.enabled is False
+    assert resolved.backup.remote.required is False
+    assert resolved.backup.remote.region_name == "auto"
+    assert resolved.backup.remote.storage_class == "STANDARD"
+    assert resolved.backup.remote.timeout_seconds == 30
+    assert resolved.backup.remote.max_attempts == 3
 
 
 @pytest.mark.parametrize(
@@ -181,8 +186,14 @@ def test_starter_configuration_is_strictly_valid() -> None:
         (("backup", "keep_last"), "10", "valid integer"),
         (("backup", "remote", "provider"), "gcs", "s3"),
         (("backup", "remote", "prefix"), "/absolute", "relative object prefix"),
-        (("backup", "remote", "prefix"), "safe/../unsafe", "parent-directory"),
+        (("backup", "remote", "prefix"), "safe/../unsafe", "normalized"),
+        (("backup", "remote", "prefix"), "safe//unsafe", "normalized"),
+        (("backup", "remote", "bucket"), "INVALID_BUCKET", "bucket name"),
+        (("backup", "remote", "endpoint_url"), "http://example.com", "HTTPS"),
+        (("backup", "remote", "endpoint_url"), "https://example.com/path", "object path"),
         (("backup", "remote", "access_key_env"), "BAD-ENV", "environment-variable"),
+        (("backup", "remote", "timeout_seconds"), 0, "greater than 0"),
+        (("backup", "remote", "max_attempts"), 0, "greater than 0"),
     ),
 )
 def test_invalid_field_families_are_rejected(
@@ -264,6 +275,8 @@ def test_enabled_remote_requires_credential_references_and_bucket() -> None:
     remote = value["backup"]["remote"]
     assert isinstance(remote, dict)
     remote["enabled"] = True
+    for field in ("bucket", "access_key_env", "secret_key_env"):
+        remote.pop(field)
 
     error = assert_configuration_error(render(value))
 
@@ -272,18 +285,46 @@ def test_enabled_remote_requires_credential_references_and_bucket() -> None:
     )
 
 
+def test_required_remote_must_be_enabled() -> None:
+    value = valid_mapping()
+    remote = value["backup"]["remote"]
+    assert isinstance(remote, dict)
+    remote["required"] = True
+
+    error = assert_configuration_error(render(value))
+
+    assert "required remote backup must also be enabled" in error.payload.what_failed
+
+
+def test_remote_endpoint_value_and_environment_reference_are_mutually_exclusive() -> None:
+    value = valid_mapping()
+    remote = value["backup"]["remote"]
+    assert isinstance(remote, dict)
+    remote["endpoint_url"] = "https://example.r2.cloudflarestorage.com"
+
+    error = assert_configuration_error(render(value))
+
+    assert "endpoint_url and endpoint_url_env are mutually exclusive" in error.payload.what_failed
+
+
 def test_valid_enabled_remote_configuration_parses() -> None:
     value = valid_mapping()
     remote = value["backup"]["remote"]
     assert isinstance(remote, dict)
+    remote.pop("endpoint_url_env")
     remote.update(
         {
             "enabled": True,
+            "required": True,
             "bucket": "verified-backups",
             "prefix": "dploydb/example",
-            "endpoint_url_env": "S3_ENDPOINT_URL",
+            "endpoint_url": "https://example.r2.cloudflarestorage.com",
             "access_key_env": "S3_ACCESS_KEY_ID",
             "secret_key_env": "S3_SECRET_ACCESS_KEY",
+            "region_name": "auto",
+            "storage_class": "STANDARD",
+            "timeout_seconds": 20,
+            "max_attempts": 4,
         }
     )
 
@@ -291,7 +332,10 @@ def test_valid_enabled_remote_configuration_parses() -> None:
 
     assert config.backup.remote is not None
     assert config.backup.remote.enabled is True
+    assert config.backup.remote.required is True
     assert config.backup.remote.bucket == "verified-backups"
+    assert config.backup.remote.endpoint_url == "https://example.r2.cloudflarestorage.com"
+    assert config.backup.remote.region_name == "auto"
 
 
 def test_candidate_container_settings_have_backward_compatible_defaults() -> None:

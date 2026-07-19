@@ -9,6 +9,7 @@ import sys
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -23,7 +24,12 @@ from dploydb.cutover import (
     restore_final_backup,
 )
 from dploydb.deploy import DeploymentResult, deploy_configured_release
-from dploydb.deployment_dependencies import CutoverDatabase, DeploymentDependencies
+from dploydb.deployment_dependencies import (
+    CutoverDatabase,
+    DeploymentDependencies,
+    FinalBackupReplicator,
+    PostActivationRetention,
+)
 from dploydb.errors import ExternalCommandError, OperationFailedError, RecoveryRequiredError
 from dploydb.health import (
     BoundedResponseEvidence,
@@ -42,9 +48,12 @@ from dploydb.models import (
     ProductionApplicationHandle,
     ProductionMigrationResult,
     ReleaseManifest,
+    RemoteBackupArtifact,
+    RemoteBackupMetadata,
     VerifiedDatabaseRestoreResult,
 )
-from dploydb.releases import ReleaseStore
+from dploydb.releases import ReleaseHistorySnapshot, ReleaseStore
+from dploydb.retention import RetentionResult
 from dploydb.runners.base import (
     CandidateMount,
     ProductionCleanup,
@@ -105,6 +114,31 @@ print("migration complete")
     config_path = tmp_path / "dploydb.yaml"
     config_path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
     return config_path, load_configuration(config_path, environment={})
+
+
+def require_remote_backup(
+    config_path: Path,
+) -> LoadedConfiguration:
+    value = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    value["backup"]["remote"].update(
+        {
+            "enabled": True,
+            "required": True,
+            "bucket": "deploy-test-backups",
+            "endpoint_url": "https://example.r2.cloudflarestorage.com",
+            "endpoint_url_env": None,
+            "access_key_env": "TEST_S3_ACCESS_KEY",
+            "secret_key_env": "TEST_S3_SECRET_KEY",
+        }
+    )
+    config_path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    return load_configuration(
+        config_path,
+        environment={
+            "TEST_S3_ACCESS_KEY": "configured-by-injected-test-boundary",
+            "TEST_S3_SECRET_KEY": "configured-by-injected-test-boundary",
+        },
+    )
 
 
 def command_result(
@@ -653,6 +687,63 @@ class FakeHealth:
         return healthy_result()
 
 
+class FakeRemoteBackup(FinalBackupReplicator):
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[tuple[str, str]] = []
+
+    def replicate(
+        self,
+        artifact: BackupArtifact,
+        *,
+        release_id: str,
+    ) -> RemoteBackupArtifact:
+        self.calls.append((artifact.metadata.backup_id, release_id))
+        if self.fail:
+            raise OperationFailedError(
+                "injected required remote final-backup upload failure",
+                production_changed=False,
+                previous_application_running=False,
+                log_path=Path("/tmp/remote-backup.log"),
+                next_safe_action="Restart the previous application and retry the upload.",
+            )
+        prefix = "deploy-test/backups"
+        return RemoteBackupArtifact(
+            metadata=RemoteBackupMetadata(
+                backup=artifact.metadata,
+                release_id=release_id,
+                database_object_key=f"{prefix}/{artifact.metadata.database_file_name}",
+                uploaded_at=datetime.now(UTC),
+            ),
+            bucket="deploy-test-backups",
+            metadata_object_key=f"{prefix}/{artifact.metadata.backup_id}.json",
+        )
+
+
+class FakeRetention(PostActivationRetention):
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.histories: list[ReleaseHistorySnapshot] = []
+
+    def apply(self, history: ReleaseHistorySnapshot) -> RetentionResult:
+        self.histories.append(history)
+        if self.fail:
+            raise OperationFailedError(
+                "injected post-activation retention failure",
+                production_changed=False,
+                previous_application_running=False,
+                log_path=Path("/tmp/retention.log"),
+                next_safe_action="Retry retention without changing the active release.",
+            )
+        return RetentionResult(
+            protected_backup_ids=(REHEARSAL_BACKUP_ID,),
+            local_deleted=(),
+            remote_deleted=(),
+            local_retained=(REHEARSAL_BACKUP_ID,),
+            remote_retained=(),
+        )
+
+
 @dataclass(slots=True)
 class Harness:
     dependencies: DeploymentDependencies
@@ -672,6 +763,8 @@ def harness(
     traffic_failures: Mapping[TrafficAction, list[CommandOutcome]] | None = None,
     fail_new_health: bool = False,
     fail_previous_health: bool = False,
+    remote_backup: FinalBackupReplicator | None = None,
+    retention: PostActivationRetention | None = None,
 ) -> Harness:
     production = FakeProduction(loaded, fault=production_fault)
     traffic = FakeTraffic(traffic_failures)
@@ -687,6 +780,8 @@ def harness(
             traffic=traffic,
             database=database,
             health=health,
+            remote_backup=remote_backup,
+            retention=retention,
         ),
         production=production,
         traffic=traffic,
@@ -771,6 +866,110 @@ def test_successful_coordinator_activates_checked_release_in_exact_order(
     )
     assert "production_migration_started" in {event.stage for event in events}
     assert "traffic_activation_started" in {event.stage for event in events}
+
+
+def test_required_remote_final_backup_is_verified_before_production_migration(
+    tmp_path: Path,
+) -> None:
+    config_path, _loaded = loaded_project(tmp_path)
+    loaded = require_remote_backup(config_path)
+    remote = FakeRemoteBackup()
+    selected = harness(loaded, config_path, remote_backup=remote)
+
+    result = run_deploy(loaded, config_path, selected)
+
+    assert result.active is True
+    assert remote.calls == [
+        (result.release.final_backup_id, result.release.release_id),
+    ]
+    assert selected.database.calls == ["create_final", "migrate"]
+    events = StateStore(loaded.config.state_directory, secrets=loaded.secrets).read_events(
+        result.operation.operation_id
+    )
+    remote_sequence = next(
+        event.sequence for event in events if "remote_final_backup" in event.evidence
+    )
+    migration_sequence = next(
+        event.sequence for event in events if event.stage == "production_migration_started"
+    )
+    assert remote_sequence < migration_sequence
+
+
+def test_required_remote_final_backup_failure_precedes_migration_and_rolls_back_app(
+    tmp_path: Path,
+) -> None:
+    config_path, _loaded = loaded_project(tmp_path)
+    loaded = require_remote_backup(config_path)
+    before = database_state(loaded.config.database.path)
+    remote = FakeRemoteBackup(fail=True)
+    selected = harness(loaded, config_path, remote_backup=remote)
+
+    result = run_deploy(loaded, config_path, selected)
+
+    assert result.rolled_back is True
+    assert result.operation.status is OperationStatus.FAILED_SAFE
+    assert result.operation.safety.production_changed is False
+    assert result.operation.safety.previous_application_running is True
+    assert result.release.production_migration_started is False
+    assert result.release.production_changed is False
+    assert remote.calls == [
+        (result.release.final_backup_id, result.release.release_id),
+    ]
+    assert selected.database.calls == ["create_final"]
+    assert selected.production.previous_running is True
+    assert selected.production.new_running is False
+    assert selected.traffic.calls == [
+        TrafficAction.ENABLE_MAINTENANCE,
+        TrafficAction.ACTIVATE_OLD,
+        TrafficAction.DISABLE_MAINTENANCE,
+    ]
+    assert database_state(loaded.config.database.path) == before
+    events = StateStore(loaded.config.state_directory, secrets=loaded.secrets).read_events(
+        result.operation.operation_id
+    )
+    assert "production_migration_started" not in {event.stage for event in events}
+
+
+def test_retention_receives_history_only_after_active_pointer_is_durable(
+    tmp_path: Path,
+) -> None:
+    config_path, loaded = loaded_project(tmp_path)
+    retention = FakeRetention()
+    selected = harness(loaded, config_path, retention=retention)
+
+    result = run_deploy(loaded, config_path, selected)
+
+    assert result.active is True
+    assert len(retention.histories) == 1
+    history = retention.histories[0]
+    assert history.pointers is not None
+    assert history.pointers.active_release_id == result.release.release_id
+    assert history.find(result.release.release_id) is not None
+    events = StateStore(loaded.config.state_directory, secrets=loaded.secrets).read_events(
+        result.operation.operation_id
+    )
+    retention_event = next(event for event in events if "retention" in event.evidence)
+    assert retention_event.evidence["retention"]["status"] == "completed"
+
+
+def test_post_activation_retention_failure_preserves_successful_active_release(
+    tmp_path: Path,
+) -> None:
+    config_path, loaded = loaded_project(tmp_path)
+    retention = FakeRetention(fail=True)
+    selected = harness(loaded, config_path, retention=retention)
+
+    result = run_deploy(loaded, config_path, selected)
+
+    assert result.active is True
+    assert result.operation.status is OperationStatus.SUCCEEDED
+    assert selected.production.new_running is True
+    assert selected.production.previous_running is False
+    events = StateStore(loaded.config.state_directory, secrets=loaded.secrets).read_events(
+        result.operation.operation_id
+    )
+    retention_event = next(event for event in events if "retention" in event.evidence)
+    assert retention_event.evidence["retention"]["status"] == "failed_safe"
 
 
 def test_later_deploy_uses_active_release_exact_application_instead_of_discovery(

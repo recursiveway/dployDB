@@ -38,11 +38,11 @@ from dploydb.redaction import JsonValue, SecretRegistry
 from dploydb.sqlite_checks import verify_sqlite_database
 from dploydb.state import DIRECTORY_MODE, StateStore
 from dploydb.storage.local import DIRECTORY_MODE as BACKUP_DIRECTORY_MODE
+from dploydb.storage.s3 import configured_s3_storage
 from dploydb.subprocesses import CommandResult, SubprocessRunner
 
 DOCTOR_COMMAND_TIMEOUT_SECONDS: Final[float] = 10.0
 _DEFERRED_CHECKS: Final[tuple[tuple[str, str], ...]] = (
-    ("remote_storage", "Remote storage checks begin in Milestone 7."),
     (
         "migration_execution",
         "Doctor never executes migrations; the lock-tracked rehearsal stage owns this check.",
@@ -380,6 +380,12 @@ def run_doctor(
         config.backup.local_directory,
         required_mode=BACKUP_DIRECTORY_MODE,
     )
+    remote_failed = _check_remote_storage(
+        checks,
+        loaded,
+        deep=deep,
+        environment=command_environment,
+    )
 
     configured_commands: tuple[tuple[str, Sequence[str]], ...] = (
         ("migration_executable", config.migration.command),
@@ -416,7 +422,7 @@ def run_doctor(
             )
 
     docker = _resolve_executable("docker", config_directory, command_environment)
-    external_failed = False
+    external_failed = remote_failed
     if docker is None:
         checks.append(
             _check(
@@ -515,6 +521,69 @@ def run_doctor(
             next_safe_action="Correct the failed checks, then run doctor again.",
         ).payload
     return _finish_doctor(config, checked_at, deep, checks, report_failure, secrets)
+
+
+def _check_remote_storage(
+    checks: list[DiagnosticCheck],
+    loaded: LoadedConfiguration,
+    *,
+    deep: bool,
+    environment: Mapping[str, str],
+) -> bool:
+    remote = loaded.config.backup.remote
+    if remote is None or not remote.enabled:
+        checks.append(
+            _check(
+                loaded.secrets,
+                "remote_storage",
+                DiagnosticOutcome.SKIPPED,
+                "Remote backup storage is not enabled.",
+            )
+        )
+        return False
+    try:
+        storage = configured_s3_storage(
+            remote,
+            secrets=loaded.secrets,
+            environment=environment,
+        )
+        if deep:
+            storage.probe_access()
+    except DployDBError as error:
+        checks.append(
+            _check(
+                loaded.secrets,
+                "remote_storage",
+                DiagnosticOutcome.FAILED,
+                error.payload.what_failed,
+                {
+                    "provider": remote.provider,
+                    "bucket": remote.bucket,
+                    "required": remote.required,
+                    "access_checked": deep,
+                },
+            )
+        )
+        return True
+    checks.append(
+        _check(
+            loaded.secrets,
+            "remote_storage",
+            DiagnosticOutcome.PASSED,
+            (
+                "Remote backup credentials and read-only bucket access passed."
+                if deep
+                else "Remote backup runtime configuration is complete."
+            ),
+            {
+                "provider": remote.provider,
+                "bucket": remote.bucket,
+                "required": remote.required,
+                "access_checked": deep,
+            },
+        )
+    )
+    return False
 
 
 def _finish_doctor(

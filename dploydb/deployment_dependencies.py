@@ -26,8 +26,11 @@ from dploydb.models import (
     BackupArtifact,
     MigrationCommandEvidence,
     ProductionMigrationResult,
+    RemoteBackupArtifact,
     VerifiedDatabaseRestoreResult,
 )
+from dploydb.releases import ReleaseHistorySnapshot
+from dploydb.retention import RetentionResult, apply_retention
 from dploydb.runners.base import (
     ApplicationRunner,
     ProductionApplicationRunner,
@@ -35,6 +38,9 @@ from dploydb.runners.base import (
 )
 from dploydb.runners.docker_compose_production import DockerComposeProductionRunner
 from dploydb.state import StateStore
+from dploydb.storage.base import RemoteBackupStorage
+from dploydb.storage.local import LocalBackupStorage
+from dploydb.storage.s3 import configured_s3_storage
 from dploydb.subprocesses import SubprocessRunner
 from dploydb.traffic import CommandTrafficController, TrafficController
 
@@ -100,6 +106,23 @@ class CutoverDatabase(Protocol):
     ) -> VerifiedDatabaseRestoreResult: ...
 
 
+class FinalBackupReplicator(Protocol):
+    """Required off-server commit boundary before production migration."""
+
+    def replicate(
+        self,
+        artifact: BackupArtifact,
+        *,
+        release_id: str,
+    ) -> RemoteBackupArtifact: ...
+
+
+class PostActivationRetention(Protocol):
+    """Cleanup boundary invoked only after active pointers are durable."""
+
+    def apply(self, history: ReleaseHistorySnapshot) -> RetentionResult: ...
+
+
 @dataclass(frozen=True, slots=True)
 class DeploymentDependencies:
     """Injectable operational boundaries used by the coordinator."""
@@ -109,6 +132,8 @@ class DeploymentDependencies:
     traffic: TrafficController
     database: CutoverDatabase
     health: ProductionHealthBoundary
+    remote_backup: FinalBackupReplicator | None = None
+    retention: PostActivationRetention | None = None
 
 
 class ConfiguredPreCutover:
@@ -222,6 +247,48 @@ class ConfiguredCutoverDatabase:
         )
 
 
+class ConfiguredFinalBackupReplicator:
+    """Upload a final local backup through the configured S3-compatible target."""
+
+    def __init__(self, storage: RemoteBackupStorage) -> None:
+        self.storage = storage
+
+    def replicate(
+        self,
+        artifact: BackupArtifact,
+        *,
+        release_id: str,
+    ) -> RemoteBackupArtifact:
+        return self.storage.put(artifact, release_id=release_id)
+
+
+class ConfiguredPostActivationRetention:
+    """Apply the configured keep policy to local and optional remote storage."""
+
+    def __init__(
+        self,
+        *,
+        project: str,
+        keep_last: int,
+        local_storage: LocalBackupStorage,
+        remote_storage: RemoteBackupStorage | None,
+    ) -> None:
+        self.project = project
+        self.keep_last = keep_last
+        self.local_storage = local_storage
+        self.remote_storage = remote_storage
+
+    def apply(self, history: ReleaseHistorySnapshot) -> RetentionResult:
+        self.local_storage.ensure_layout()
+        return apply_retention(
+            project=self.project,
+            keep_last=self.keep_last,
+            history=history,
+            local_storage=self.local_storage,
+            remote_storage=self.remote_storage,
+        )
+
+
 def default_dependencies(
     loaded: LoadedConfiguration,
     *,
@@ -257,6 +324,24 @@ def default_dependencies(
         working_directory=working_directory,
         command_environment=command_environment,
     )
+    remote_storage: RemoteBackupStorage | None = None
+    remote_backup: FinalBackupReplicator | None = None
+    remote_config = loaded.config.backup.remote
+    if remote_config is not None and remote_config.enabled:
+        remote_storage = configured_s3_storage(
+            remote_config,
+            secrets=loaded.secrets,
+            environment=command_environment,
+        )
+    if remote_config is not None and remote_config.required:
+        assert remote_storage is not None
+        remote_backup = ConfiguredFinalBackupReplicator(remote_storage)
+    retention = ConfiguredPostActivationRetention(
+        project=loaded.config.project,
+        keep_last=loaded.config.backup.keep_last,
+        local_storage=LocalBackupStorage(loaded.config.backup.local_directory),
+        remote_storage=remote_storage,
+    )
     return (
         DeploymentDependencies(
             pre_cutover=ConfiguredPreCutover(
@@ -274,6 +359,8 @@ def default_dependencies(
                 command_runner=None,
             ),
             health=health,
+            remote_backup=remote_backup,
+            retention=retention,
         ),
         health,
     )

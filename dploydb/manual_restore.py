@@ -8,7 +8,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from dploydb.backup import create_verified_backup, verify_configured_backup
+from dploydb.backup import create_verified_backup, open_verified_configured_backup
 from dploydb.config import (
     LoadedConfiguration,
     configuration_fingerprint,
@@ -38,6 +38,7 @@ from dploydb.locking import DeploymentLock
 from dploydb.migration import require_clean_operation_state
 from dploydb.models import (
     BackupArtifact,
+    BackupMetadata,
     BackupPurpose,
     DeploymentState,
     FailureRecord,
@@ -54,6 +55,7 @@ from dploydb.restore import restore_verified_database
 from dploydb.runners.base import ProductionApplicationRunner
 from dploydb.sqlite_checks import verify_sqlite_database
 from dploydb.state import StateStore
+from dploydb.storage.base import RemoteBackupStorage
 from dploydb.storage.local import LocalBackupStorage
 from dploydb.subprocesses import CommandOutcome
 from dploydb.traffic import TrafficController, TrafficHookResult
@@ -71,7 +73,7 @@ class RestoreSelection:
 
     active_release: ReleaseManifest
     selected_release: ReleaseManifest
-    selected_backup: BackupArtifact
+    selected_backup_metadata: BackupMetadata
     current_application: ProductionApplicationHandle
     selected_application: ProductionApplicationHandle
     database_path: Path
@@ -82,8 +84,8 @@ class RestoreSelection:
             "active_version": self.active_release.requested_version,
             "selected_release_id": self.selected_release.release_id,
             "selected_version": self.selected_release.requested_version,
-            "selected_backup_id": self.selected_backup.metadata.backup_id,
-            "selected_backup_sha256": self.selected_backup.metadata.sha256,
+            "selected_backup_id": self.selected_backup_metadata.backup_id,
+            "selected_backup_sha256": self.selected_backup_metadata.sha256,
             "current_container_id": self.current_application.container_id,
             "current_container_name": self.current_application.container_name,
             "selected_container_id": self.selected_application.container_id,
@@ -156,6 +158,7 @@ class _RestoreContext:
     database_replaced: bool = False
     traffic_activation_attempted: bool = False
     normal_traffic_may_be_enabled: bool = False
+    selected_backup: BackupArtifact | None = None
     pre_restore_backup: BackupArtifact | None = None
     database_restore: VerifiedDatabaseRestoreResult | None = None
 
@@ -166,6 +169,9 @@ FaultInjector = Callable[[str], None]
 def preview_configured_restore(
     loaded: LoadedConfiguration,
     release_id: str,
+    *,
+    environment: Mapping[str, str] | None = None,
+    remote_storage: RemoteBackupStorage | None = None,
 ) -> RestoreSelection:
     """Resolve the protected previous release without mutating any local state."""
     releases = ReleaseStore(loaded.config.state_directory, secrets=loaded.secrets)
@@ -240,23 +246,29 @@ def preview_configured_restore(
             log_path=active.operation_log_path,
             next_safe_action="Do not restore an older release without its final backup.",
         )
-    backup = verify_configured_backup(loaded, active.final_backup_id)
-    if (
-        backup.metadata.purpose is not BackupPurpose.FINAL
-        or backup.metadata.operation_id != active.operation_id
-        or backup.metadata.sha256 != active.final_backup_sha256
-    ):
-        raise SafetyCheckError(
-            "selected restore backup contradicts the active release manifest",
-            production_changed=False,
-            previous_application_running=None,
-            log_path=backup.metadata_path,
-            next_safe_action="Preserve the backup and release evidence; do not restore it.",
-        )
+    with open_verified_configured_backup(
+        loaded,
+        active.final_backup_id,
+        environment=environment,
+        remote_storage=remote_storage,
+    ) as backup:
+        if (
+            backup.metadata.purpose is not BackupPurpose.FINAL
+            or backup.metadata.operation_id != active.operation_id
+            or backup.metadata.sha256 != active.final_backup_sha256
+        ):
+            raise SafetyCheckError(
+                "selected restore backup contradicts the active release manifest",
+                production_changed=False,
+                previous_application_running=None,
+                log_path=backup.metadata_path,
+                next_safe_action="Preserve the backup and release evidence; do not restore it.",
+            )
+        backup_metadata = backup.metadata
     return RestoreSelection(
         active_release=active,
         selected_release=selected,
-        selected_backup=backup,
+        selected_backup_metadata=backup_metadata,
         current_application=current_application,
         selected_application=selected_application,
         database_path=loaded.config.database.path,
@@ -269,6 +281,7 @@ def restore_configured_release(
     *,
     config_path: Path,
     command_environment: Mapping[str, str] | None = None,
+    remote_storage: RemoteBackupStorage | None = None,
     dependencies: ManualRestoreDependencies | None = None,
     cancellation_event: threading.Event | None = None,
     fault_injector: FaultInjector | None = None,
@@ -285,7 +298,12 @@ def restore_configured_release(
 
     with lock:
         require_clean_operation_state(lock, store)
-        selection = preview_configured_restore(loaded, release_id)
+        selection = preview_configured_restore(
+            loaded,
+            release_id,
+            environment=selected_environment,
+            remote_storage=remote_storage,
+        )
         selected_dependencies = dependencies
         if selected_dependencies is None:
             deployment_dependencies, owned_health = default_dependencies(
@@ -320,8 +338,16 @@ def restore_configured_release(
             cancellation_event=cancellation_event,
         )
         try:
-            return _run_manual_restore(context, inject=inject)
-        except DployDBError:
+            with open_verified_configured_backup(
+                loaded,
+                selection.selected_backup_metadata.backup_id,
+                environment=selected_environment,
+                remote_storage=remote_storage,
+            ) as selected_backup:
+                context.selected_backup = selected_backup
+                return _run_manual_restore(context, inject=inject)
+        except DployDBError as error:
+            _finish_restore_failure(context, error)
             raise
         except Exception as raw_error:
             recovery = RecoveryRequiredError(
@@ -399,7 +425,7 @@ def _run_manual_restore(
             stage="manual_restore_prepared",
             message="The selected and current-state backups are verified.",
             evidence={
-                "selected_backup_id": context.selection.selected_backup.metadata.backup_id,
+                "selected_backup_id": context.selection.selected_backup_metadata.backup_id,
                 "pre_restore_backup_id": context.pre_restore_backup.metadata.backup_id,
             },
             safety=SafetyFacts(
@@ -420,8 +446,9 @@ def _run_manual_restore(
                 recovery_required=False,
             ),
         )
+        assert context.selected_backup is not None
         context.database_restore = restore_verified_database(
-            context.selection.selected_backup,
+            context.selected_backup,
             context.loaded.config.database.path,
             application_stopped=True,
             traffic_activated=False,

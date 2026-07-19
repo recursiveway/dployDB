@@ -6,7 +6,11 @@ import hashlib
 import os
 import sqlite3
 import stat
+import tempfile
 import time
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -25,24 +29,63 @@ from dploydb.models import (
     FailureRecord,
     LockOwnerState,
     OperationStatus,
+    RemoteBackupArtifact,
     SafetyFacts,
     new_backup_id,
     utc_now,
 )
 from dploydb.sqlite_checks import DEFAULT_SQLITE_TIMEOUT_SECONDS, verify_sqlite_database
 from dploydb.state import StateStore
-from dploydb.storage.base import BackupStorage
+from dploydb.storage.base import BackupStorage, RemoteBackupStorage
 from dploydb.storage.local import LocalBackupStorage
+from dploydb.storage.s3 import configured_s3_storage
 
 BACKUP_TIMEOUT_SECONDS: Final[float] = 120.0
 COPY_PAGES: Final[int] = 256
 HASH_CHUNK_BYTES: Final[int] = 1024 * 1024
 
 
+@dataclass(frozen=True, slots=True)
+class ConfiguredBackupResult:
+    """Verified local backup plus optional committed remote replica."""
+
+    local: BackupArtifact
+    remote: RemoteBackupArtifact | None
+
+
 def create_configured_backup(loaded: LoadedConfiguration) -> BackupArtifact:
+    """Compatibility wrapper returning the verified local backup artifact."""
+    return create_configured_backup_result(loaded).local
+
+
+def create_configured_backup_result(
+    loaded: LoadedConfiguration,
+    *,
+    upload: bool = False,
+    environment: Mapping[str, str] | None = None,
+    remote_storage: RemoteBackupStorage | None = None,
+) -> ConfiguredBackupResult:
     """Run one exclusive, durable standalone backup operation."""
     config = loaded.config
     secrets = loaded.secrets
+    remote_config = config.backup.remote
+    remote_required = bool(remote_config is not None and remote_config.required)
+    should_upload = upload or remote_required
+    selected_remote = remote_storage
+    if should_upload:
+        if remote_config is None or not remote_config.enabled:
+            raise OperationFailedError(
+                "remote upload was requested but remote backup is not enabled",
+                production_changed=False,
+                previous_application_running=None,
+                next_safe_action="Enable and configure backup.remote, then retry with --upload.",
+            )
+        if selected_remote is None:
+            selected_remote = configured_s3_storage(
+                remote_config,
+                secrets=secrets,
+                environment=os.environ if environment is None else environment,
+            )
     store = StateStore(config.state_directory, secrets=secrets)
     lock = DeploymentLock(config.state_directory, secrets=secrets)
     with lock:
@@ -91,19 +134,43 @@ def create_configured_backup(loaded: LoadedConfiguration) -> BackupArtifact:
                 operation_id=operation.operation_id,
                 metadata_source_path=_safe_metadata_path(config.database.path, loaded),
             )
-            store.transition(
-                operation.operation_id,
-                status=OperationStatus.SUCCEEDED,
-                stage="snapshot_verified",
-                message="Verified local SQLite backup completed.",
-                evidence={
-                    "backup_id": artifact.metadata.backup_id,
-                    "backup_path": str(artifact.database_path),
-                    "sha256": artifact.metadata.sha256,
-                    "size_bytes": artifact.metadata.size_bytes,
-                },
-            )
-            return artifact
+            local_evidence = {
+                "backup_id": artifact.metadata.backup_id,
+                "backup_path": str(artifact.database_path),
+                "sha256": artifact.metadata.sha256,
+                "size_bytes": artifact.metadata.size_bytes,
+            }
+            remote_artifact: RemoteBackupArtifact | None = None
+            if should_upload:
+                assert selected_remote is not None
+                store.transition(
+                    operation.operation_id,
+                    status=OperationStatus.IN_PROGRESS,
+                    stage="snapshot_verified",
+                    message="Verified local SQLite backup completed before remote upload.",
+                    evidence=local_evidence,
+                )
+                remote_artifact = selected_remote.put(artifact)
+                store.transition(
+                    operation.operation_id,
+                    status=OperationStatus.SUCCEEDED,
+                    stage="remote_snapshot_verified",
+                    message="Verified local and remote SQLite backup completed.",
+                    evidence={
+                        **local_evidence,
+                        "remote": remote_artifact.model_dump(mode="json"),
+                        "remote_required": remote_required,
+                    },
+                )
+            else:
+                store.transition(
+                    operation.operation_id,
+                    status=OperationStatus.SUCCEEDED,
+                    stage="snapshot_verified",
+                    message="Verified local SQLite backup completed.",
+                    evidence=local_evidence,
+                )
+            return ConfiguredBackupResult(local=artifact, remote=remote_artifact)
         except DployDBError as error:
             status = (
                 OperationStatus.RECOVERY_REQUIRED
@@ -147,6 +214,63 @@ def verify_configured_backup(
             "backup project does not match the configured project",
         )
     return artifact
+
+
+@contextmanager
+def open_verified_configured_backup(
+    loaded: LoadedConfiguration,
+    backup_id: str,
+    *,
+    environment: Mapping[str, str] | None = None,
+    remote_storage: RemoteBackupStorage | None = None,
+) -> Iterator[BackupArtifact]:
+    """Yield a verified local backup or an ephemeral verified remote hydration."""
+    local = LocalBackupStorage(loaded.config.backup.local_directory)
+    try:
+        artifact = verify_configured_backup(loaded, backup_id)
+    except SafetyCheckError:
+        if not _local_artifact_absent(local, backup_id):
+            raise
+    else:
+        yield artifact
+        return
+
+    remote_config = loaded.config.backup.remote
+    if remote_config is None or not remote_config.enabled:
+        raise _verification_error(
+            local.root / f"{backup_id}.json",
+            "backup is absent locally and remote backup is not enabled",
+        )
+    selected_remote = remote_storage
+    if selected_remote is None:
+        selected_remote = configured_s3_storage(
+            remote_config,
+            secrets=loaded.secrets,
+            environment=os.environ if environment is None else environment,
+        )
+
+    with tempfile.TemporaryDirectory(prefix="dploydb-remote-hydration-") as directory:
+        root = Path(directory)
+        os.chmod(root, 0o700)
+        temporary = LocalBackupStorage(root)
+        staged = temporary.create_staging_database(backup_id)
+        try:
+            remote = selected_remote.download(backup_id, staged)
+            if remote.metadata.backup.project != loaded.secrets.redact_text(loaded.config.project):
+                raise _verification_error(
+                    staged,
+                    "remote backup project does not match the configured project",
+                )
+            artifact = temporary.put(staged, remote.metadata.backup)
+            yield verify_backup(temporary, backup_id)
+        finally:
+            staged.unlink(missing_ok=True)
+
+
+def _local_artifact_absent(storage: LocalBackupStorage, backup_id: str) -> bool:
+    database = storage.root / f"{backup_id}.db"
+    metadata = storage.root / f"{backup_id}.json"
+    return not any(path.exists() or path.is_symlink() for path in (database, metadata))
 
 
 def _safe_metadata_path(path: Path, loaded: LoadedConfiguration) -> Path:

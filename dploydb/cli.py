@@ -8,7 +8,7 @@ from typing import Annotated, NoReturn, cast
 import typer
 from rich.console import Console
 
-from dploydb.backup import create_configured_backup, verify_configured_backup
+from dploydb.backup import create_configured_backup_result, verify_configured_backup
 from dploydb.config import DEFAULT_CONFIG_PATH, initialize_configuration, load_configuration
 from dploydb.deploy import DeploymentResult, deploy_configured_release
 from dploydb.diagnostics import (
@@ -40,6 +40,7 @@ from dploydb.models import (
     FailurePayload,
     ReleaseManifest,
     ReleasePointers,
+    RemoteBackupArtifact,
 )
 from dploydb.recovery import (
     RecoveryDisposition,
@@ -160,9 +161,10 @@ def _backup_result(
     *,
     command: str,
     secrets: SecretRegistry,
+    remote: RemoteBackupArtifact | None = None,
 ) -> dict[str, object]:
     metadata = artifact.metadata
-    return {
+    result: dict[str, object] = {
         "ok": True,
         "command": command,
         "project": secrets.redact_text(metadata.project),
@@ -176,6 +178,21 @@ def _backup_result(
         "completed_at": metadata.model_dump(mode="json")["completed_at"],
         "checks": metadata.sqlite.model_dump(mode="json"),
     }
+    if command == "backup":
+        result["remote_uploaded"] = remote is not None
+        result["remote"] = (
+            None
+            if remote is None
+            else {
+                "provider": "s3",
+                "bucket": remote.bucket,
+                "database_object_key": remote.metadata.database_object_key,
+                "metadata_object_key": remote.metadata_object_key,
+                "uploaded_at": remote.metadata.model_dump(mode="json")["uploaded_at"],
+                "release_id": remote.metadata.release_id,
+            }
+        )
+    return result
 
 
 def _render_backup_result(
@@ -184,22 +201,28 @@ def _render_backup_result(
     command: str,
     json_output: bool,
     secrets: SecretRegistry,
+    remote: RemoteBackupArtifact | None = None,
 ) -> str:
-    result = _backup_result(artifact, command=command, secrets=secrets)
+    result = _backup_result(artifact, command=command, secrets=secrets, remote=remote)
     if json_output:
         return json.dumps(result, sort_keys=True, separators=(",", ":"))
     action = "created" if command == "backup" else "verified"
-    return "\n".join(
-        (
-            f"DployDB backup {action}.",
-            f"Project: {result['project']}",
-            f"Backup ID: {result['backup_id']}",
-            f"Database: {result['database_path']}",
-            f"Size: {result['size_bytes']} bytes",
-            f"SHA-256: {result['sha256']}",
-            "SQLite checks: passed",
+    lines = [
+        f"DployDB backup {action}.",
+        f"Project: {result['project']}",
+        f"Backup ID: {result['backup_id']}",
+        f"Database: {result['database_path']}",
+        f"Size: {result['size_bytes']} bytes",
+        f"SHA-256: {result['sha256']}",
+        "SQLite checks: passed",
+    ]
+    if command == "backup":
+        lines.append(
+            "Remote backup: verified and committed"
+            if remote is not None
+            else "Remote backup: not requested"
         )
-    )
+    return "\n".join(lines)
 
 
 def _rolled_back_failure(result: DeploymentResult) -> FailurePayload:
@@ -727,12 +750,19 @@ def backup_command(
         bool,
         typer.Option("--json", help="Emit stable machine-readable output."),
     ] = False,
+    upload: Annotated[
+        bool,
+        typer.Option(
+            "--upload",
+            help="Upload the verified local backup to configured remote storage.",
+        ),
+    ] = False,
 ) -> None:
-    """Create and verify one consistent local SQLite backup."""
+    """Create one verified local backup and optionally commit it remotely."""
     loaded = None
     try:
         loaded = load_configuration(config_path)
-        artifact = create_configured_backup(loaded)
+        result = create_configured_backup_result(loaded, upload=upload)
     except DployDBError as error:
         if loaded is not None:
             error = redact_error(error, secrets=loaded.secrets)
@@ -741,10 +771,11 @@ def backup_command(
         abort_with_error(_internal_error(), json_output=json_output)
     typer.echo(
         _render_backup_result(
-            artifact,
+            result.local,
             command="backup",
             json_output=json_output,
             secrets=loaded.secrets,
+            remote=result.remote,
         )
     )
 

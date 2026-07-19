@@ -335,6 +335,77 @@ class BackupArtifact(DurableModel):
         return self
 
 
+class RemoteBackupMetadata(DurableModel):
+    """Metadata-last commit marker for one immutable off-server backup."""
+
+    schema_version: Literal[1] = 1
+    backup: BackupMetadata
+    release_id: str | None = Field(default=None, pattern=r"^release_[0-9a-f]{32}$")
+    database_object_key: str = Field(min_length=1, max_length=1024)
+    uploaded_at: datetime
+
+    @field_validator("database_object_key")
+    @classmethod
+    def validate_database_object_key(cls, value: str) -> str:
+        parts = value.split("/")
+        if (
+            value.startswith("/")
+            or "\x00" in value
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ValueError("remote database object key must be normalized and relative")
+        if len(value.encode("utf-8")) > 1024:
+            raise ValueError("remote database object key exceeds the S3 key limit")
+        return value
+
+    @field_validator("uploaded_at")
+    @classmethod
+    def normalize_uploaded_at(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("timestamp must be timezone-aware")
+        normalized = value.astimezone(UTC)
+        return normalized.replace(microsecond=(normalized.microsecond // 1000) * 1000)
+
+    @field_serializer("uploaded_at")
+    def serialize_uploaded_at(self, value: datetime) -> str:
+        return serialize_utc_timestamp(value)
+
+    @model_validator(mode="after")
+    def validate_remote_identity(self) -> Self:
+        if self.database_object_key.split("/")[-1] != self.backup.database_file_name:
+            raise ValueError("remote database object key does not match backup identity")
+        return self
+
+
+class RemoteBackupArtifact(DurableModel):
+    """Resolved non-secret identity of one committed remote backup."""
+
+    metadata: RemoteBackupMetadata
+    bucket: str = Field(min_length=1, max_length=255)
+    metadata_object_key: str = Field(min_length=1, max_length=1024)
+
+    @field_validator("metadata_object_key")
+    @classmethod
+    def validate_metadata_object_key(cls, value: str) -> str:
+        parts = value.split("/")
+        if (
+            value.startswith("/")
+            or "\x00" in value
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ValueError("remote metadata object key must be normalized and relative")
+        if len(value.encode("utf-8")) > 1024:
+            raise ValueError("remote metadata object key exceeds the S3 key limit")
+        return value
+
+    @model_validator(mode="after")
+    def validate_remote_artifact_identity(self) -> Self:
+        expected = f"{self.metadata.backup.backup_id}.json"
+        if self.metadata_object_key.split("/")[-1] != expected:
+            raise ValueError("remote metadata object key does not match backup identity")
+        return self
+
+
 class RestoreResult(DurableModel):
     """Durable result returned by the internal stopped-application restore engine."""
 

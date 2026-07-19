@@ -291,6 +291,7 @@ def _run_deployment(
                 recovery_required=False,
             ),
         )
+        _replicate_required_final_backup(context, final_backup)
 
         def record_migration(evidence: MigrationCommandEvidence) -> None:
             context.store.append_event(
@@ -549,6 +550,51 @@ def _activate_new_traffic(context: _Context) -> None:
     )
 
 
+def _replicate_required_final_backup(
+    context: _Context,
+    final_backup: BackupArtifact,
+) -> None:
+    remote_config = context.loaded.config.backup.remote
+    if remote_config is None or not remote_config.required:
+        return
+    replicator = context.dependencies.remote_backup
+    if replicator is None:
+        raise OperationFailedError(
+            "required remote final-backup storage is unavailable",
+            production_changed=False,
+            previous_application_running=False,
+            log_path=context.operation_log,
+            next_safe_action=(
+                "Keep production unchanged, restart the previous application, and correct "
+                "remote backup configuration before retrying deployment."
+            ),
+        )
+    remote = replicator.replicate(
+        final_backup,
+        release_id=context.release_id,
+    )
+    if (
+        remote.metadata.backup != final_backup.metadata
+        or remote.metadata.release_id != context.release_id
+    ):
+        raise OperationFailedError(
+            "required remote final-backup evidence contradicts the local verified backup",
+            production_changed=False,
+            previous_application_running=False,
+            log_path=context.operation_log,
+            next_safe_action=(
+                "Preserve both backup records, restart the previous application, and inspect "
+                "remote storage before retrying deployment."
+            ),
+        )
+    context.store.append_event(
+        context.operation_id,
+        message="The required final backup was committed and verified off-server.",
+        evidence={"remote_final_backup": remote.model_dump(mode="json")},
+    )
+    context.fault_injector("after_final_remote_verified")
+
+
 def _disable_maintenance_after_activation(context: _Context) -> None:
     result = context.dependencies.traffic.disable_maintenance(
         cancellation_event=context.cancellation_event
@@ -578,6 +624,48 @@ def _complete_active(context: _Context) -> DeploymentResult:
         health_checks=tuple(context.health_evidence),
     )
     pointers = context.releases.activate_release(context.release_id)
+    retention_evidence: dict[str, JsonValue] = {"status": "not_configured"}
+    if context.dependencies.retention is not None:
+        try:
+            retention = context.dependencies.retention.apply(context.releases.read_history())
+            retention_evidence = {
+                "status": "completed",
+                "result": cast(JsonValue, retention.as_evidence()),
+            }
+            context.store.append_event(
+                context.operation_id,
+                message=(
+                    "Backup retention completed after the active release and pointers were durable."
+                ),
+                evidence={"retention": retention_evidence},
+            )
+        except DployDBError as error:
+            retention_evidence = {
+                "status": "failed_safe",
+                "failure": cast(JsonValue, error.payload.as_dict()),
+            }
+            context.store.append_event(
+                context.operation_id,
+                message=(
+                    "Backup retention did not complete; the active deployment is preserved "
+                    "and no rollback is permitted after traffic activation."
+                ),
+                evidence={"retention": retention_evidence},
+            )
+        except Exception as error:
+            detail = context.loaded.secrets.redact_text(f"{type(error).__name__}: {error}")
+            retention_evidence = {
+                "status": "failed_safe",
+                "failure": {"what_failed": detail},
+            }
+            context.store.append_event(
+                context.operation_id,
+                message=(
+                    "Backup retention failed unexpectedly; the active deployment is "
+                    "preserved and no rollback is permitted after traffic activation."
+                ),
+                evidence={"retention": retention_evidence},
+            )
     operation = context.store.transition(
         context.operation_id,
         status=OperationStatus.SUCCEEDED,
@@ -587,6 +675,7 @@ def _complete_active(context: _Context) -> DeploymentResult:
             "release_id": context.release_id,
             "active_release_id": pointers.active_release_id,
             "previous_release_id": pointers.previous_release_id,
+            "retention": retention_evidence,
         },
         safety=SafetyFacts(
             production_changed=True,
