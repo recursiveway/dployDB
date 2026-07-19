@@ -2401,15 +2401,21 @@ GitHub preparation evidence observed on 2026-07-19:
   the local SQLite build exhausted `busy_timeout`. The test now accepts either
   explicit safe result and still proves the operation returns within its bound;
   production behavior remains unchanged.
+- GitHub Actions run
+  [`29684025591`](https://github.com/recursiveway/dployDB/actions/runs/29684025591)
+  passed the complete `Safety and package gate` on Ubuntu in 2m52s: locked
+  dependency sync, Ruff, format, strict mypy, all `588` tests, and the clean
+  wheel/source build and distribution audit.
+- `main` now requires that exact successful check with strict up-to-date branch
+  enforcement. Protection includes administrators, requires linear history and
+  resolved review conversations, and prohibits force-pushes and deletion.
 
 Status: `LOCAL GATE COMPLETE; PUBLICATION PENDING`. No signed `v0.1.0` tag
-exists. Main-branch protection will be enabled after the release PR check name
-has passed once. The dedicated SSH signing key, matching TestPyPI/PyPI pending
-Trusted Publishers, release PR merge, registry uploads, and GitHub prerelease
-still require their ordered external gates. Registry URLs, public hashes,
-signed-tag evidence, and GitHub prerelease evidence must be appended here after
-those gates pass. The release must not be called published before that
-verification.
+exists. The dedicated SSH signing key, matching TestPyPI/PyPI pending Trusted
+Publishers, release PR merge, registry uploads, and GitHub prerelease still
+require their ordered external gates. Registry URLs, public hashes, signed-tag
+evidence, and GitHub prerelease evidence must be appended here after those
+gates pass. The release must not be called published before that verification.
 
 ---
 
