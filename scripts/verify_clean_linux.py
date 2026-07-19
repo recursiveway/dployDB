@@ -198,6 +198,7 @@ def _demo_environment() -> dict[str, str]:
         "DPLOYDB_DEMO_UID": "0",
         "DPLOYDB_VERSION": "v1",
         "NO_COLOR": "1",
+        "PWD": "/workspace",
         "PYTHONPATH": "/workspace",
     }
 
@@ -288,6 +289,12 @@ def _run_readme_demo(container: str, executable: str) -> dict[str, Any]:
     release_payload = json.loads(releases.stdout)
     if release_payload.get("active_release_id") != deployment_payload.get("release_id"):
         _stop("clean Linux release history does not select the deployed release")
+    selected_releases = release_payload.get("releases")
+    if not isinstance(selected_releases, list) or len(selected_releases) != 1:
+        _stop(f"clean Linux release history was unexpected: {release_payload!r}")
+    operation_log = selected_releases[0].get("log_path")
+    if not isinstance(operation_log, str) or not operation_log.startswith("/workspace/"):
+        _stop(f"clean Linux release log path was not absolute: {operation_log!r}")
 
     database_check = _exec(
         container,

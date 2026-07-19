@@ -1,4 +1,4 @@
-"""Release-readiness contracts for DployDB 0.1.0 Alpha."""
+"""Release-readiness contracts for DployDB 0.1.1 Alpha."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def test_public_package_metadata_declares_alpha_license_owner_and_urls() -> None
 
     assert metadata["build-system"]["requires"] == ["hatchling>=1.27"]
     assert project["name"] == "dploydb"
-    assert project["version"] == "0.1.0"
+    assert project["version"] == "0.1.1"
     assert project["license"] == "Apache-2.0"
     assert project["license-files"] == ["LICENSE", "NOTICE"]
     assert project["authors"] == [{"name": "RecursiveWay"}]
@@ -80,8 +80,8 @@ def test_license_notice_and_public_policies_are_present() -> None:
 def test_readme_is_explicitly_alpha_and_publicly_installable() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "DployDB 0.1.0 is Alpha software" in readme
-    assert "pipx install dploydb==0.1.0" in readme
+    assert "DployDB 0.1.1 is Alpha software" in readme
+    assert "pipx install dploydb==0.1.1" in readme
     assert "Apache License 2.0" in readme
     assert "1.0.0" in readme
     assert "SECURITY.md" in readme

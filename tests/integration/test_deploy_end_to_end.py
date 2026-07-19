@@ -23,6 +23,8 @@ import yaml
 
 from dploydb.config import STARTER_CONFIGURATION
 from dploydb.models import new_operation_id
+from dploydb.redaction import SecretRegistry
+from dploydb.releases import ReleaseStore
 from dploydb.storage.local import LocalBackupStorage
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -390,6 +392,8 @@ def test_real_docker_deploy_flows_and_pre_activation_traffic_isolation(
             time.sleep(0.025)
         assert any(record["observed"] == "old" for record in monitor.records)
 
+        deployment_environment = _environment(data, production_port, release)
+        deployment_environment["PWD"] = str(tmp_path)
         result = subprocess.run(
             [
                 str(ROOT / ".venv" / "bin" / "dploydb"),
@@ -401,8 +405,8 @@ def test_real_docker_deploy_flows_and_pre_activation_traffic_isolation(
                 "--json",
                 "--non-interactive",
             ],
-            cwd=ROOT,
-            env=_environment(data, production_port, release),
+            cwd=tmp_path,
+            env=deployment_environment,
             capture_output=True,
             text=True,
             timeout=300,
@@ -413,6 +417,10 @@ def test_real_docker_deploy_flows_and_pre_activation_traffic_isolation(
         assert payload["outcome"] == expected_outcome
         assert payload["traffic_activated"] is (scenario == "success")
         assert payload["recovery_required"] is False
+        release_store = ReleaseStore(tmp_path / "state", secrets=SecretRegistry())
+        persisted_release, _pointers = release_store.lookup_history_release(payload["release_id"])
+        assert persisted_release.operation_log_path.is_absolute()
+        assert persisted_release.operation_log_path.is_relative_to(tmp_path)
 
         if scenario == "success":
             _wait_for_release(production_port, "v2")

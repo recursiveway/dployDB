@@ -38,7 +38,7 @@ def test_readme_quick_start_uses_the_installed_cli_and_parses_real_json() -> Non
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     for required in (
-        "pipx install dploydb==0.1.0",
+        "pipx install dploydb==0.1.1",
         "git clone https://github.com/recursiveway/dployDB.git",
         "python3 -m demo.prepare",
         "dploydb --no-color doctor --deep",

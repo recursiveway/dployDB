@@ -8,7 +8,7 @@
 DployDB is being built as a deployment-safety tool for applications that use one SQLite database on one Linux server.
 
 > [!WARNING]
-> DployDB 0.1.0 is Alpha software. Its safety gates are real and extensively
+> DployDB 0.1.1 is Alpha software. Its safety gates are real and extensively
 > tested, but public interfaces may still change in documented `0.x` minor
 > releases. Read the [supported limits](docs/limitations.md), keep independent
 > backups, and prove the complete failure/restore flow on a non-production host
@@ -29,7 +29,7 @@ docker compose version
 
 git clone https://github.com/recursiveway/dployDB.git
 cd dployDB
-pipx install dploydb==0.1.0
+pipx install dploydb==0.1.1
 dploydb --no-color version
 ```
 
@@ -157,7 +157,7 @@ off-server backup, and protected retention are implemented.
 Install the published Alpha CLI:
 
 ```bash
-pipx install dploydb==0.1.0
+pipx install dploydb==0.1.1
 dploydb version
 ```
 

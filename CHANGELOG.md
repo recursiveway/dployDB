@@ -6,6 +6,16 @@ All notable changes to DployDB are documented here. The project follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-19
+
+### Fixed
+
+- Treat the standard uppercase Linux `PWD` environment variable as a working
+  directory rather than a password field, preventing exact-value redaction from
+  invalidating absolute release-manifest paths during deployment.
+- Exercise the installed clean-Linux deployment with `PWD` equal to the project
+  root and require the active release to retain an absolute operation-log path.
+
 ## [0.1.0] - 2026-07-19
 
 ### Added
@@ -32,5 +42,6 @@ All notable changes to DployDB are documented here. The project follows
 - During `0.x`, breaking public-contract changes may occur only in minor releases
   and will include explicit migration guidance.
 
-[Unreleased]: https://github.com/recursiveway/dployDB/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/recursiveway/dployDB/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/recursiveway/dployDB/releases/tag/v0.1.1
 [0.1.0]: https://github.com/recursiveway/dployDB/releases/tag/v0.1.0

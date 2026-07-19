@@ -25,7 +25,7 @@ docker compose version
 Install the exact published Alpha version into an isolated environment:
 
 ```bash
-pipx install dploydb==0.1.0
+pipx install dploydb==0.1.1
 dploydb --no-color version
 ```
 
