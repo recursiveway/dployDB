@@ -2386,12 +2386,30 @@ Local acceptance evidence observed on 2026-07-19:
   JSON shape, configuration schema, durable state, recovery protocol, or
   backup format changed.
 
-Status: `LOCAL GATE COMPLETE; PUBLICATION PENDING`. The GitHub CLI session for
-`recursiveway` is expired, no signed `v0.1.0` tag exists, and the protected
-GitHub/TestPyPI/PyPI environments and pending Trusted Publishers still require
-authenticated owner setup. Registry URLs, public hashes, signed-tag evidence,
-and GitHub prerelease evidence must be appended here after those external gates
-pass. The release must not be called published before that verification.
+GitHub preparation evidence observed on 2026-07-19:
+
+- The release changes are committed on `codex/alpha-release-readiness` and the
+  draft release PR is [recursiveway/dployDB#1](https://github.com/recursiveway/dployDB/pull/1).
+- The `recursiveway` GitHub CLI session was reauthenticated. The repository is
+  public with Issues, secret scanning, push protection, Dependabot alerts and
+  automated security fixes, and private vulnerability reporting enabled.
+- Protected `testpypi` and `pypi` environments require review by a
+  RecursiveWay maintainer. Active GitHub tag ruleset `19168357` protects
+  creation, update, deletion, and non-fast-forward changes for `v*` tags.
+- The first Linux PR gate exposed a platform-dependent SQLite test expectation:
+  the GitHub runner returned an immediate safe `database is locked` error where
+  the local SQLite build exhausted `busy_timeout`. The test now accepts either
+  explicit safe result and still proves the operation returns within its bound;
+  production behavior remains unchanged.
+
+Status: `LOCAL GATE COMPLETE; PUBLICATION PENDING`. No signed `v0.1.0` tag
+exists. Main-branch protection will be enabled after the release PR check name
+has passed once. The dedicated SSH signing key, matching TestPyPI/PyPI pending
+Trusted Publishers, release PR merge, registry uploads, and GitHub prerelease
+still require their ordered external gates. Registry URLs, public hashes,
+signed-tag evidence, and GitHub prerelease evidence must be appended here after
+those gates pass. The release must not be called published before that
+verification.
 
 ---
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -77,17 +78,26 @@ def test_foreign_key_violation_is_rejected(tmp_path: Path) -> None:
         verify_sqlite_database(path)
 
 
-def test_locked_database_respects_timeout(tmp_path: Path) -> None:
+def test_locked_database_fails_safely_within_timeout(tmp_path: Path) -> None:
     path = tmp_path / "app.db"
     _database(path)
     writer = sqlite3.connect(path, timeout=0)
     writer.execute("BEGIN EXCLUSIVE")
+    started_at = time.monotonic()
     try:
-        with pytest.raises(SafetyCheckError, match="timed out"):
+        with pytest.raises(SafetyCheckError) as captured:
             verify_sqlite_database(path, timeout_seconds=0.02)
     finally:
         writer.rollback()
         writer.close()
+
+    # SQLite builds may either honor busy_timeout before failing or return
+    # SQLITE_BUSY immediately. Both outcomes are explicit, bounded, and safe.
+    detail = str(captured.value)
+    assert "timed out" in detail or "database is locked" in detail
+    assert time.monotonic() - started_at < 1.0
+    assert captured.value.payload.production_changed is False
+    assert captured.value.payload.recovery_required is False
 
 
 def test_progress_deadline_interrupts_long_check(tmp_path: Path) -> None:
