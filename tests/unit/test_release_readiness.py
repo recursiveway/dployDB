@@ -110,6 +110,21 @@ def test_workflows_pin_actions_and_limit_publish_permissions() -> None:
     assert "--draft=false --prerelease=true" in release
 
 
+def test_release_workflow_recovers_an_existing_immutable_tag_from_main() -> None:
+    release = WORKFLOWS[1].read_text(encoding="utf-8")
+
+    assert "workflow_dispatch:" in release
+    assert "Existing verified release tag to recover" in release
+    assert "release tag is not canonical" in release
+    assert 'test "$GITHUB_REF" = "refs/heads/main"' in release
+    assert '"refs/tags/${TAG}:refs/tags/${TAG}"' in release
+    assert 'test "$object_type" = "tag"' in release
+    assert 'test "$remote_target" = "$(git rev-parse "${TAG}^{}")"' in release
+    assert ".verification.verified" in release
+    assert release.count("ref: refs/tags/${{ env.RELEASE_TAG }}") == 4
+    assert "${{ github.ref_name }}" not in release
+
+
 def _write_wheel(path: Path, version: str) -> None:
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr(
