@@ -7,8 +7,11 @@ import json
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
-from importlib.metadata import version
+import tomllib
+import zipfile
+from email import message_from_bytes
 from pathlib import Path
 
 COMMAND_TIMEOUT_SECONDS = 300
@@ -58,13 +61,46 @@ def _arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _metadata_version(raw: bytes, *, source: str) -> str:
+    selected = message_from_bytes(raw).get("Version")
+    if not selected:
+        raise RuntimeError(f"distribution metadata has no Version field: {source}")
+    return selected
+
+
+def expected_distribution_version(install_target: Path) -> str:
+    if install_target.is_dir():
+        metadata = tomllib.loads((install_target / "pyproject.toml").read_text(encoding="utf-8"))
+        return str(metadata["project"]["version"])
+    if install_target.suffix == ".whl":
+        with zipfile.ZipFile(install_target) as archive:
+            matches = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+            if len(matches) != 1:
+                raise RuntimeError(f"wheel has unexpected metadata files: {matches!r}")
+            return _metadata_version(archive.read(matches[0]), source=matches[0])
+    if install_target.name.endswith(".tar.gz"):
+        with tarfile.open(install_target, "r:gz") as archive:
+            source_matches = [
+                member for member in archive.getmembers() if member.name.endswith("/PKG-INFO")
+            ]
+            if len(source_matches) != 1:
+                raise RuntimeError(
+                    f"source archive has unexpected metadata files: {source_matches!r}"
+                )
+            selected = archive.extractfile(source_matches[0])
+            if selected is None:
+                raise RuntimeError(f"could not read source metadata: {source_matches[0].name}")
+            return _metadata_version(selected.read(), source=source_matches[0].name)
+    raise RuntimeError(f"unsupported install target for version audit: {install_target}")
+
+
 def main() -> None:
     arguments = _arguments()
     project_root = Path(__file__).resolve().parents[1]
     install_target = (arguments.artifact or project_root).resolve()
     if not install_target.exists():
         raise RuntimeError(f"install target does not exist: {install_target}")
-    expected_version = f"dploydb {version('dploydb')}"
+    expected_version = f"dploydb {expected_distribution_version(install_target)}"
 
     with tempfile.TemporaryDirectory(prefix="dploydb-pipx-") as temporary_directory:
         temporary_path = Path(temporary_directory)

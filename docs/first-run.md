@@ -22,13 +22,16 @@ docker version
 docker compose version
 ```
 
-Install a reviewed wheel or the checked-out source tree into an isolated
-environment:
+Install the exact published Alpha version into an isolated environment:
 
 ```bash
-pipx install ./dist/dploydb-0.1.0-py3-none-any.whl
+pipx install dploydb==0.1.0
 dploydb --no-color version
 ```
+
+For an offline host, download the wheel and its `SHA256SUMS` attachment from the
+matching signed GitHub release, verify the checksum, and pass that reviewed
+wheel path to `pipx install`.
 
 ## 2. Create and edit the configuration
 

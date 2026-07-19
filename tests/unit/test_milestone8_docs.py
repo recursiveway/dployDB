@@ -8,6 +8,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DOCUMENTS = (
     ROOT / "README.md",
+    ROOT / "CHANGELOG.md",
+    ROOT / "CODE_OF_CONDUCT.md",
+    ROOT / "CONTRIBUTING.md",
+    ROOT / "RELEASING.md",
+    ROOT / "SECURITY.md",
     ROOT / "docs" / "first-run.md",
     ROOT / "docs" / "security.md",
     ROOT / "docs" / "limitations.md",
@@ -33,7 +38,8 @@ def test_readme_quick_start_uses_the_installed_cli_and_parses_real_json() -> Non
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     for required in (
-        "pipx install .",
+        "pipx install dploydb==0.1.0",
+        "git clone https://github.com/recursiveway/dployDB.git",
         "python3 -m demo.prepare",
         "dploydb --no-color doctor --deep",
         "--json --non-interactive",

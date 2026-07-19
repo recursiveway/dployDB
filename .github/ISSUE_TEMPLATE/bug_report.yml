@@ -1,0 +1,47 @@
+name: Bug report
+description: Report a reproducible DployDB defect without exposing production data.
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove credentials, hostnames, database contents, and unredacted logs.
+        Report vulnerabilities through the private security advisory form instead.
+  - type: input
+    id: version
+    attributes:
+      label: DployDB version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Supported environment
+      description: Linux distribution, Python, Docker, Compose, and SQLite versions.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide redacted commands and exact observed output.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety outcome
+      description: State whether production changed, the previous app is running, recovery is required, and where the redacted log is.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Reporter checks
+      options:
+        - label: I removed secrets, production data, and identifying host information.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

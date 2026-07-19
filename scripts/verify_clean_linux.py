@@ -10,6 +10,8 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import zipfile
+from email import message_from_bytes
 from pathlib import Path
 from typing import Any, NoReturn
 from uuid import uuid4
@@ -166,9 +168,20 @@ print(json.dumps(result, sort_keys=True, separators=(',', ':')))
     return {str(name): str(digest) for name, digest in value.items()}
 
 
-def _installed_cli_audit(container: str, executable: str) -> None:
+def wheel_version(wheel: Path) -> str:
+    with zipfile.ZipFile(wheel) as archive:
+        matches = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+        if len(matches) != 1:
+            _stop(f"wheel has unexpected metadata files: {matches!r}")
+        selected = message_from_bytes(archive.read(matches[0])).get("Version")
+    if not selected:
+        _stop("wheel metadata has no Version field")
+    return selected
+
+
+def _installed_cli_audit(container: str, executable: str, *, expected_version: str) -> None:
     version = _exec(container, [executable, "--no-color", "version"])
-    if version.stdout.strip() != "dploydb 0.1.0":
+    if version.stdout.strip() != f"dploydb {expected_version}":
         _stop(f"installed CLI returned an unexpected version: {version.stdout!r}")
     for arguments in REQUIRED_HELP:
         result = _exec(container, [executable, "--no-color", *arguments])
@@ -384,6 +397,8 @@ def main() -> None:
         "wheel": wheel.name,
         "wheel_sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(),
     }
+    expected_version = wheel_version(wheel)
+    summary["version"] = expected_version
     with tempfile.TemporaryDirectory(prefix="dploydb-m8-linux-") as temporary:
         archive = Path(temporary) / "source.tar"
         summary["source_file_count"] = _write_source_archive(root, archive)
@@ -447,7 +462,7 @@ def main() -> None:
                 timeout=DEPLOY_TIMEOUT_SECONDS,
             )
             executable = "/root/.local/bin/dploydb"
-            _installed_cli_audit(container, executable)
+            _installed_cli_audit(container, executable, expected_version=expected_version)
             deployment = _run_readme_demo(container, executable)
             summary["release_id"] = deployment["release_id"]
             summary["outcome"] = deployment["outcome"]

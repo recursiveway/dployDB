@@ -77,6 +77,12 @@ The product must be useful after the hackathon. Do not build fake progress scree
   (`COMPLETE` on 2026-07-19). Slices 8A through 8C, the complete regression
   suite, installed-wheel audit, and clean-Linux README-only gate passed;
   Milestone 9 is the next allowed work.
+- **Current release-readiness slice:** DployDB 0.1.0 Alpha publication
+  (`LOCAL GATE COMPLETE; PUBLICATION PENDING` on 2026-07-19). This bounded post-Milestone-8 slice owns the
+  Apache-2.0 license, public package metadata, distribution-content boundary,
+  community/release policies, release verification, and least-privilege
+  GitHub/TestPyPI/PyPI workflows. It does not change deployment behavior,
+  durable state, rollback rules, or any public CLI/JSON contract.
 - **Dependency workflow:** Use uv for project dependencies and development commands. Support and verify `pipx install .` as the isolated end-user installation path.
 - **Repository outcome:** Every existing `.gitignore` rule remains, including `IMPLEMENTATION_PLAN.md`; `demo/.state/` was added for generated demo databases.
 
@@ -2320,6 +2326,72 @@ Observed on 2026-07-19 after all slice changes:
 Milestone 8 is complete. Milestone 9 presentation polish is the next allowed
 work; no dashboard, generated release report, schema visualization, or other
 Milestone 9 feature was started.
+
+#### DployDB 0.1.0 Alpha publication readiness
+
+Planned on 2026-07-19:
+
+- **Owned artifacts:** `pyproject.toml`, the public license and community
+  policies, release documentation, package/distribution verification helpers,
+  and GitHub CI/release workflows.
+- **License boundary:** publish the original DployDB work under Apache-2.0,
+  copyright 2026 RecursiveWay, without adding per-file headers or claiming
+  ownership of third-party dependencies.
+- **Package boundary:** retain version `0.1.0` and the Alpha classifier, add
+  PEP 639 metadata and public project links, include license evidence in wheel
+  and source distribution, and exclude local agent settings and internal
+  planning instructions from published artifacts.
+- **Release boundary:** build one reviewed wheel/source pair, verify it on a
+  clean Linux host, publish those exact bytes through protected OIDC Trusted
+  Publishing environments, and finalize a GitHub prerelease only after public
+  installation succeeds. Long-lived PyPI credentials are prohibited.
+- **Public contract boundary:** this slice changes no deployment behavior,
+  command, option, exit code, JSON shape, configuration schema, durable state,
+  recovery protocol, or backup format.
+- **Acceptance gate:** focused metadata/documentation/distribution tests, the
+  complete real Docker/loopback suite, Ruff, format check, strict mypy for the
+  package and demo, fresh build validation, isolated pipx installation, and
+  the clean-Linux README deployment gate must pass before a release tag.
+
+Local acceptance evidence observed on 2026-07-19:
+
+- `.venv/bin/python -m pytest -q` with unrestricted Docker and loopback access
+  passed (`588 passed in 172.25s`), including all prior deployment, rollback,
+  restore, recovery, retention, and clean-state safety coverage plus 19 new
+  release-readiness tests.
+- Focused metadata, public-documentation, workflow, version, and distribution
+  tests passed (`40 passed`). Ruff check and format check passed for all `98`
+  Python files; strict mypy passed for all `34` package modules, `9` demo
+  modules, and `6` release-verification scripts.
+- `uv lock --check` passed with `65` resolved packages. `uv build` produced a
+  wheel from the source distribution, and Twine accepted both artifacts.
+- `scripts/verify_distribution.py --tag v0.1.0` passed. The final wheel contains
+  `40` files with SHA-256
+  `1235050bdcee0688b6bc34b5a642d9f13e235de100ec086bcdb693eb72771d1d`;
+  the allowlisted source distribution contains `131` files with SHA-256
+  `a882f434f0d3238f38eff2a1eb5d5cfc15525fd99292f17c6a253aeda7803532`.
+  Apache-2.0 metadata, repository license/notice bytes, author, Alpha
+  classifier, Python requirement, and project links matched exactly; local
+  agent settings, internal plans, databases, generated state, and credentials
+  were absent.
+- The isolated pipx audit installed the final wheel, verified every required
+  help/version/JSON path, uninstalled it, and preserved configuration and
+  backup bytes. Actionlint `v1.7.7` accepted both pinned GitHub workflows.
+- The disposable `docker:29.1-dind` clean-Linux gate passed with Python 3.12.13
+  and Docker 29.1.5. It installed the final wheel, completed a real deployment
+  with `outcome=active`, preserved all `14` database/state/backup/release files
+  byte-for-byte through uninstall, and removed the inner and outer Docker
+  resources. The verified wheel hash matched the final hash above.
+- `git diff --check` passed. No deployment behavior, command, option, exit code,
+  JSON shape, configuration schema, durable state, recovery protocol, or
+  backup format changed.
+
+Status: `LOCAL GATE COMPLETE; PUBLICATION PENDING`. The GitHub CLI session for
+`recursiveway` is expired, no signed `v0.1.0` tag exists, and the protected
+GitHub/TestPyPI/PyPI environments and pending Trusted Publishers still require
+authenticated owner setup. Registry URLs, public hashes, signed-tag evidence,
+and GitHub prerelease evidence must be appended here after those external gates
+pass. The release must not be called published before that verification.
 
 ---
 
