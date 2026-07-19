@@ -72,6 +72,7 @@ from dploydb.subprocesses import (
     CapturedOutput,
     CommandOutcome,
     CommandResult,
+    SubprocessRunner,
     TerminationReason,
 )
 from dploydb.traffic import TrafficAction, TrafficHookResult
@@ -866,6 +867,36 @@ def test_successful_coordinator_activates_checked_release_in_exact_order(
     )
     assert "production_migration_started" in {event.stage for event in events}
     assert "traffic_activation_started" in {event.stage for event in events}
+
+
+def test_standard_pwd_environment_preserves_absolute_release_paths(tmp_path: Path) -> None:
+    config_path, loaded = loaded_project(tmp_path)
+    command = SubprocessRunner(secrets=loaded.secrets).run(
+        [sys.executable, "-c", "pass"],
+        timeout_seconds=5,
+        environment={"PWD": str(tmp_path)},
+        working_directory=tmp_path,
+    )
+    assert command.succeeded
+    assert command.working_directory == str(tmp_path)
+
+    selected = harness(loaded, config_path)
+    result = run_deploy(loaded, config_path, selected)
+
+    persisted = ReleaseStore(
+        loaded.config.state_directory,
+        secrets=loaded.secrets,
+    ).read_manifest(result.release.release_id)
+    assert result.active is True
+    assert persisted.status is DeploymentState.ACTIVE
+    assert persisted.operation_log_path.is_absolute()
+    assert persisted.operation_log_path.is_relative_to(tmp_path)
+    assert persisted.previous_application is not None
+    assert persisted.previous_application.database_directory.is_absolute()
+    assert persisted.previous_application.database_directory.is_relative_to(tmp_path)
+    assert persisted.new_application is not None
+    assert persisted.new_application.database_directory.is_absolute()
+    assert persisted.new_application.database_directory.is_relative_to(tmp_path)
 
 
 def test_required_remote_final_backup_is_verified_before_production_migration(

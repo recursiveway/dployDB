@@ -46,6 +46,9 @@ def test_empty_secret_values_are_ignored_without_corrupting_output() -> None:
     "key",
     (
         "password",
+        "pwd",
+        "DATABASE_PWD",
+        "--pwd",
         "DATABASE_PASSWORD",
         "api-key",
         "S3_SECRET_ACCESS_KEY",
@@ -61,7 +64,10 @@ def test_sensitive_keys_are_recognized(key: str) -> None:
     assert is_sensitive_key(key)
 
 
-@pytest.mark.parametrize("key", ("project", "candidate_port", "secretary", "tokenizer"))
+@pytest.mark.parametrize(
+    "key",
+    ("PWD", "project", "candidate_port", "secretary", "tokenizer"),
+)
 def test_non_sensitive_keys_are_not_over_redacted(key: str) -> None:
     assert not is_sensitive_key(key)
 

@@ -77,14 +77,90 @@ The product must be useful after the hackathon. Do not build fake progress scree
   (`COMPLETE` on 2026-07-19). Slices 8A through 8C, the complete regression
   suite, installed-wheel audit, and clean-Linux README-only gate passed;
   Milestone 9 is the next allowed work.
-- **Current release-readiness slice:** DployDB 0.1.0 Alpha publication
+- **Current release-readiness slice:** DployDB 0.1.1 Alpha correction
   (`LOCAL GATE COMPLETE; PUBLICATION PENDING` on 2026-07-19). This bounded post-Milestone-8 slice owns the
   Apache-2.0 license, public package metadata, distribution-content boundary,
   community/release policies, release verification, and least-privilege
   GitHub/TestPyPI/PyPI workflows. It does not change deployment behavior,
   durable state, rollback rules, or any public CLI/JSON contract.
+- **Completed corrective slice:** DployDB 0.1.1 Linux `PWD` redaction regression
+  (`COMPLETE` on 2026-07-19). A real installed-CLI run proved that the
+  standard `PWD` environment variable was misclassified as a password, causing
+  its absolute working-directory value to be registered as a secret and later
+  redacted out of typed release-manifest paths. The reported failure occurred
+  after verified backup and successful rehearsal, before production mutation.
 - **Dependency workflow:** Use uv for project dependencies and development commands. Support and verify `pipx install .` as the isolated end-user installation path.
 - **Repository outcome:** Every existing `.gitignore` rule remains, including `IMPLEMENTATION_PLAN.md`; `demo/.state/` was added for generated demo databases.
+
+#### DployDB 0.1.1 `PWD` redaction corrective slice
+
+Planned on 2026-07-19:
+
+- **Owned modules:** `dploydb/redaction.py`, the focused redaction/subprocess/
+  deployment regression tests, `scripts/verify_clean_linux.py`, and the bounded
+  0.1.1 package-version/changelog/install-documentation metadata. Release state
+  models and transition semantics remain unchanged.
+- **Detection boundary:** exempt exactly the standard uppercase environment key
+  `PWD` from secret-value registration while retaining `pwd`, `--pwd`, and
+  prefixed password-key detection. Text containing an explicit password-style
+  assignment remains redacted independently of exact-value registration.
+- **Durable-state boundary:** prove a normal `PWD` equal to the project root is
+  never registered as a secret and therefore cannot rewrite absolute operation
+  log or application database paths during release persistence.
+- **Focused gate:** execute a real bounded subprocess with `PWD` equal to the
+  temporary configured project root, then complete the deployment coordinator
+  to `active` and reread its strict release manifest.
+- **Installed end-to-end gate:** run the built wheel in the clean Linux
+  Docker-in-Docker README flow with explicit `PWD=/workspace`; require
+  `{"ok": true, "outcome": "active"}`, valid absolute release paths, healthy
+  v2, and clean Docker resources.
+- **Completion gate:** focused tests, full `pytest`, Ruff check and format,
+  mypy for `dploydb` and `demo`, distribution build/audit, installed-CLI gate,
+  and real Docker deployment must all pass before this slice is complete.
+
+Corrective-slice acceptance evidence observed on 2026-07-19:
+
+- The exact uppercase `PWD` key is now classified as a standard non-secret
+  environment key while `pwd`, `DATABASE_PWD`, and `--pwd` remain sensitive.
+  Explicit password-style assignment text is still covered by the independent
+  text-redaction patterns.
+- Focused redaction and deployment regression command passed (`30 passed, 27
+  deselected`). The regression executed a real bounded subprocess with `PWD`
+  equal to the configured project root, completed the coordinator to `active`,
+  reread the strict release manifest, and proved its operation-log and previous/
+  new database-directory paths remained absolute beneath that root.
+- The focused real-Docker golden path passed (`1 passed in 5.16s`) with the CLI
+  process working directory and explicit `PWD` both equal to the directory
+  containing the database, configuration, backups, and state. The deployment
+  activated v2 and the persisted release log path remained absolute.
+- Final `.venv/bin/python -m pytest -q` passed all `594` tests in `178.52s`
+  against the version-bumped 0.1.1 source, including real Docker deployment,
+  rollback, restore, crash recovery, retention, and secret-redaction gates.
+- `.venv/bin/ruff check .` and `.venv/bin/ruff format --check .` passed for all
+  `98` Python files. Strict mypy passed for all `34` package modules and all `9`
+  demo modules. Console and module version commands both reported `dploydb
+  0.1.1`; `git diff --check` passed.
+- `uv lock --check`, `uv sync --locked`, and the final locked-environment check
+  passed with `65` resolved and `58` checked packages. `uv build` produced
+  `dist/dploydb-0.1.1-py3-none-any.whl` and `dist/dploydb-0.1.1.tar.gz`; Twine
+  accepted both.
+- `scripts/verify_distribution.py --tag v0.1.1` passed. The wheel contains `40`
+  files with SHA-256
+  `2522dffc6880b58f428686b86ddbb63029860262241caa5f9fa9b3a785230dc7`; the
+  allowlisted source distribution contains `131` files with SHA-256
+  `202137807f95ca6c0b4a195ba94d1ce35bf116afab60e581da65c32d0e7b8e63`.
+- The isolated pipx audit installed the exact 0.1.1 wheel and passed every
+  required CLI, JSON, version, and uninstall check.
+- `scripts/verify_clean_linux.py --wheel
+  dist/dploydb-0.1.1-py3-none-any.whl` passed inside privileged
+  Docker-in-Docker Linux with Python 3.12.13 and Docker 29.1.5. It explicitly
+  supplied `PWD=/workspace`, installed the wheel, returned `outcome: active`,
+  verified v2 and an absolute `/workspace/...` operation-log path, cleaned all
+  containers/networks, and proved uninstall preserved all `14` database,
+  backup, release, and event files.
+- No release-state model, transition, backup, migration, cutover, rollback, or
+  recovery semantics changed. The correction is confined to the shared secret
+  key classifier, its regression gates, and the 0.1.1 release metadata/docs.
 
 #### Milestone 0A acceptance evidence
 

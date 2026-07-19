@@ -127,7 +127,10 @@ _URL_USERINFO = re.compile(
 
 def is_sensitive_key(key: str) -> bool:
     """Return whether a mapping key conventionally contains a secret value."""
-    candidate = key.strip().strip("\"'").removeprefix("--")
+    normalized = key.strip().strip("\"'")
+    if normalized == "PWD":
+        return False
+    candidate = normalized.removeprefix("--")
     return _SENSITIVE_KEY.fullmatch(candidate) is not None
 
 
